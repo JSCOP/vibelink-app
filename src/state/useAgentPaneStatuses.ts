@@ -5,6 +5,7 @@ import {
   resolveAgentPaneStatus,
   type AgentPaneActivity,
   type AgentPaneStatus,
+  type PaneScreenState,
 } from './agentPaneStatus'
 import { isAgentPane, type Settings } from './profiles'
 import { useWorkspaceStore } from './store'
@@ -14,6 +15,7 @@ export type AgentPaneStatusesSelectorState = {
   panes: Record<string, PaneMeta>
   settings: Settings
   paneAgentActivity: Record<string, AgentPaneActivity>
+  paneScreenStates: Record<string, PaneScreenState>
   attentionSnapshot: AttentionSnapshot | null
   paneCompletionHighlights: Readonly<Record<string, unknown>>
 }
@@ -35,6 +37,7 @@ export function createAgentPaneStatusesSelector() {
   let panes: AgentPaneStatusesSelectorState['panes'] | undefined
   let profiles: Settings['profiles'] | undefined
   let activity: AgentPaneStatusesSelectorState['paneAgentActivity'] | undefined
+  let screenStates: AgentPaneStatusesSelectorState['paneScreenStates'] | undefined
   let attention: AttentionSnapshot | null | undefined
   let completions: AgentPaneStatusesSelectorState['paneCompletionHighlights'] | undefined
   let statuses: Record<string, AgentPaneStatus> | undefined
@@ -45,6 +48,7 @@ export function createAgentPaneStatusesSelector() {
       && panes === state.panes
       && profiles === state.settings.profiles
       && activity === state.paneAgentActivity
+      && screenStates === state.paneScreenStates
       && attention === state.attentionSnapshot
       && completions === state.paneCompletionHighlights
     ) return statuses
@@ -53,12 +57,14 @@ export function createAgentPaneStatusesSelector() {
       panes: state.panes,
       settings: state.settings,
       activity: state.paneAgentActivity,
+      screenStates: state.paneScreenStates,
       attention: state.attentionSnapshot,
       completions: state.paneCompletionHighlights,
     })
     panes = state.panes
     profiles = state.settings.profiles
     activity = state.paneAgentActivity
+    screenStates = state.paneScreenStates
     attention = state.attentionSnapshot
     completions = state.paneCompletionHighlights
     if (statuses && equalAgentPaneStatuses(statuses, next)) return statuses
@@ -82,6 +88,7 @@ export function useAgentPaneStatus(paneId: string | null | undefined): AgentPane
   const pane = useWorkspaceStore((state) => paneId ? state.panes[paneId] : undefined)
   const settings = useWorkspaceStore((state) => state.settings)
   const activity = useWorkspaceStore((state) => paneId ? state.paneAgentActivity[paneId] : undefined)
+  const screen = useWorkspaceStore((state) => paneId ? state.paneScreenStates[paneId] : undefined)
   const attentionState = useWorkspaceStore((state) => paneId ? state.attentionSnapshot?.panes.find((entry) => entry.paneId === paneId)?.state : undefined)
   const attentionUpdatedAt = useWorkspaceStore((state) => paneId ? state.attentionSnapshot?.panes.find((entry) => entry.paneId === paneId)?.stateUpdatedAt ?? 0 : 0)
   const completed = useWorkspaceStore((state) => paneId ? Boolean(state.paneCompletionHighlights[paneId]) : false)
@@ -93,8 +100,9 @@ export function useAgentPaneStatus(paneId: string | null | undefined): AgentPane
       title: pane.config.title,
       attention: attentionState ? { state: attentionState, stateUpdatedAt: attentionUpdatedAt } : undefined,
       activity,
+      screen,
       completed,
     })
     return status.state === 'idle' ? null : status
-  }, [activity, attentionState, attentionUpdatedAt, completed, pane, paneId, settings])
+  }, [activity, attentionState, attentionUpdatedAt, completed, pane, paneId, screen, settings])
 }

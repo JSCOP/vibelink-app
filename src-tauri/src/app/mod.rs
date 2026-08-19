@@ -276,6 +276,8 @@ pub fn run() {
             commands::remote_create_pairing,
             commands::remote_create_pairing_v2,
             commands::remote_revoke_device,
+            commands::remote_set_device_grants,
+            commands::report_pane_screen_state,
             commands::remote_regenerate_identity,
             commands::remote_firewall_status,
             commands::remote_setup_firewall,

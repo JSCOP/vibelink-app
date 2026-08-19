@@ -559,6 +559,14 @@ pub enum ClientToDaemon {
         session_id: Uuid,
         event: TaskSignal,
     },
+    /// GUI screen-content agent detection (herdr-style). `None` clears the
+    /// overlay for the pane. Feeds attention snapshots and remote pane state
+    /// for panes that orchestration does not manage.
+    ReportPaneScreenState {
+        req: Req,
+        pane_id: Uuid,
+        state: Option<AttentionPaneState>,
+    },
     Control {
         req: Req,
         operation_id: Uuid,

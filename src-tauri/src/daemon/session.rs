@@ -75,6 +75,8 @@ pub struct DaemonState {
     next_pane_lease_revision: u64,
     desktop_selection: DesktopSelection,
     spawn_cancellations: HashMap<(Uuid, Uuid), Instant>,
+    /// Screen-content agent states reported by the GUI, keyed by pane.
+    pane_screen_states: HashMap<Uuid, (AttentionPaneState, u64)>,
 }
 
 impl DaemonState {
@@ -92,6 +94,22 @@ impl DaemonState {
                 pane_id: None,
             },
             spawn_cancellations: HashMap::new(),
+            pane_screen_states: HashMap::new(),
+        }
+    }
+
+    pub fn set_pane_screen_state(&mut self, pane_id: Uuid, state: Option<AttentionPaneState>) {
+        match state {
+            Some(state) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|value| u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or_default();
+                self.pane_screen_states.insert(pane_id, (state, now));
+            }
+            None => {
+                self.pane_screen_states.remove(&pane_id);
+            }
         }
     }
 
@@ -262,6 +280,7 @@ impl DaemonState {
         for session in self.sessions.values() {
             for pane in session.panes.values() {
                 let projection = pane_states.get(&pane.id.to_string());
+                let screen = self.pane_screen_states.get(&pane.id);
                 let state = projection.map_or(AttentionPaneState::Idle, |projection| {
                     if projection.blocked {
                         AttentionPaneState::Blocked
@@ -279,24 +298,33 @@ impl DaemonState {
                         }
                     }
                 });
+                // Orchestration owns dispatched panes; the GUI's screen detection
+                // covers every other agent pane (a bare `claude` in a shell).
+                let orchestrated = projection.is_some_and(|value| value.state_updated_at > 0);
+                let (state, state_updated_at, source) = if orchestrated {
+                    (
+                        state,
+                        projection
+                            .map(|value| value.state_updated_at)
+                            .unwrap_or_default(),
+                        "orchestration",
+                    )
+                } else if let Some((screen_state, at)) = screen {
+                    (screen_state.clone(), *at, "screen")
+                } else {
+                    (state, 0, "pty")
+                };
                 panes.push(AttentionPane {
                     workspace_id: session.meta.id,
                     pane_id: pane.id,
                     state,
-                    state_updated_at: projection
-                        .map(|value| value.state_updated_at)
-                        .unwrap_or_default(),
+                    state_updated_at,
                     last_output_at: pane.last_output_at(),
                     unread_count: projection
                         .map(|value| value.unread_count)
                         .unwrap_or_default(),
                     interrupted: projection.is_some_and(|value| value.interrupted),
-                    source: if projection.is_some_and(|value| value.state_updated_at > 0) {
-                        "orchestration"
-                    } else {
-                        "pty"
-                    }
-                    .to_string(),
+                    source: source.to_string(),
                     alive: pane.alive,
                     title: pane
                         .config

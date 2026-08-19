@@ -18,7 +18,7 @@ export type AgentPaneState = 'working' | 'waiting' | 'done' | 'error' | 'idle'
  *  daemon's dispatch projection; `terminal-title` is the agent's own OSC title
  *  (spinner glyphs, "Running"/"Idle"); `terminal-activity` is VibeLink's local
  *  typed-prompt heuristic. */
-export type AgentPaneStatusSource = 'agent-hook' | 'orchestration' | 'terminal-title' | 'terminal-activity' | 'none'
+export type AgentPaneStatusSource = 'agent-hook' | 'orchestration' | 'terminal-title' | 'terminal-activity' | 'none' | 'screen'
 
 export type AgentPaneStatus = {
   state: AgentPaneState
@@ -63,6 +63,17 @@ export function agentStateFromTitle(title: string | null | undefined): 'working'
   return null
 }
 
+/** A screen-content detection result published by the terminal layer. */
+export type PaneScreenState = {
+  state: 'working' | 'blocked' | 'idle'
+  ruleId: string
+  at: number
+}
+
+/** Screen evidence goes stale fast: a detached or scrolled pane must not pin
+ *  a state forever. */
+export const paneScreenStateTtlMs = 20_000
+
 export type AgentPaneStatusInput = {
   /** Whether VibeLink recognizes an agent in this pane. Gates only the INFERRED
    *  signals: a hook or the daemon reporting a turn is proof by itself, and
@@ -75,6 +86,8 @@ export type AgentPaneStatusInput = {
   attention?: Pick<NativeAttentionPane, 'state' | 'stateUpdatedAt'>
   /** Local typed-prompt evidence that a turn started. */
   activity?: AgentPaneActivity
+  /** Screen-content rule match (herdr-style), when fresh. */
+  screen?: PaneScreenState
   /** Unacknowledged completion alert for this pane. */
   completed?: boolean
   now?: number
@@ -96,6 +109,15 @@ export function resolveAgentPaneStatus(input: AgentPaneStatusInput): AgentPaneSt
     if (attention.state === 'blocked' || attention.state === 'waiting') return waitingStatus('orchestration')
     if (attention.state === 'error') return { state: 'error', source: 'orchestration', label: 'Error', pulsing: false }
     if (attention.state === 'working') return workingStatus('orchestration')
+  }
+
+  // Screen-content rules see the actual prompt UI (permission forms, pickers)
+  // that neither the title nor local heuristics can, so they outrank both.
+  const screen = input.screen
+  if (screen && input.isAgentPane && now - screen.at <= paneScreenStateTtlMs) {
+    if (screen.state === 'blocked') return waitingStatus('screen')
+    if (screen.state === 'working') return workingStatus('screen')
+    // An explicit idle prompt box falls through: title/completion still apply.
   }
 
   const titleState = input.isAgentPane ? agentStateFromTitle(input.title) : null
@@ -144,6 +166,7 @@ export type AgentPaneStatusesInput = {
   panes: Record<string, PaneMeta>
   settings: Settings
   activity: Record<string, AgentPaneActivity>
+  screenStates?: Record<string, PaneScreenState>
   attention: AttentionSnapshot | null
   /** Unacknowledged completion alerts, keyed by pane id. */
   completions: Readonly<Record<string, unknown>>
@@ -166,6 +189,7 @@ export function buildAgentPaneStatuses(input: AgentPaneStatusesInput): Record<st
       title: pane.config.title,
       attention: attentionByPane.get(paneId),
       activity: input.activity[paneId],
+      screen: input.screenStates?.[paneId],
       completed: Boolean(input.completions[paneId]),
       now,
     })

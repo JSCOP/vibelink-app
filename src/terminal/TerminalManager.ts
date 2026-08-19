@@ -17,6 +17,7 @@ import { copyAllTerminalContents, copyTerminalSelection } from './copy'
 import { createPathLinkProvider, createImageMarkerLinkProvider, type CaptureLinkActions } from './links'
 import { terminalOutputAfterLastHardClear, terminalQuerySequences, terminalStateSequences } from './clearSequences'
 import { hasCursorResponse, snapshotCursorQueries, type SnapshotCursorQuery } from './cursorResponse'
+import { clearAgentScreenDetection, initAgentScreenDetection, noteAgentScreenTitle, scheduleAgentScreenDetection } from './agentScreenScheduler'
 import { agentActivityTracker, type AgentActivityActions } from './agentActivity'
 import { refreshRemotePaneLease, type RemotePaneLeaseStatus, useRemotePaneLeaseStore } from '../remote/paneLease'
 import { beginInteractiveResize, endInteractiveResize, isDividerResizeActive, type InteractiveResizeKind } from '../layout/interactiveResize'
@@ -688,7 +689,10 @@ class TerminalManagerImpl {
       // `set_pane_title` IPC per frame on the socket that also carries typing.
       entry.titleDisposable = options?.onTitleChange
         ? entry.term.onTitleChange((title) => {
-          this.titleCoalescer.submit(paneId, title, (coalesced) => entry.titleHandler?.(coalesced))
+          this.titleCoalescer.submit(paneId, title, (coalesced) => {
+            noteAgentScreenTitle(paneId, coalesced)
+            entry.titleHandler?.(coalesced)
+          })
         })
         : undefined
     }
@@ -1151,6 +1155,7 @@ class TerminalManagerImpl {
   ): void {
     if (bytes.byteLength === 0) return
     agentActivityTracker.noteOutput(paneId, bytes)
+    scheduleAgentScreenDetection(paneId)
     const entry = this.getOrCreate(paneId)
     const frame = { paneGeneration, outputSequence, bytes }
     if (!entry.opened
@@ -1182,6 +1187,7 @@ class TerminalManagerImpl {
   write(paneId: string, bytes: Uint8Array, options: { foreground?: boolean } = {}): void {
     if (bytes.byteLength === 0) return
     agentActivityTracker.noteOutput(paneId, bytes)
+    scheduleAgentScreenDetection(paneId)
     this.writeEntry(this.getOrCreate(paneId), bytes, options.foreground)
   }
 
@@ -1698,6 +1704,7 @@ class TerminalManagerImpl {
     const entry = this.entries.get(paneId)
     if (!entry) return
     agentActivityTracker.clear(paneId)
+    clearAgentScreenDetection(paneId)
     this.dividerResizePaneIds.delete(paneId)
     entry.observer?.disconnect()
     if (entry.fitFrame !== undefined) cancelAnimationFrame(entry.fitFrame)
@@ -2459,3 +2466,7 @@ function concatUint8Arrays(chunks: Uint8Array[], byteLength: number): Uint8Array
 
 
 export const TerminalManager = new TerminalManagerImpl()
+
+// The detector reads the pane's trailing screen lines through the same API the
+// workspace digest uses; registered here to avoid a module cycle.
+initAgentScreenDetection((paneId, maxLines) => TerminalManager.getRecentOutput(paneId, maxLines))

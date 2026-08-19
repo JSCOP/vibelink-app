@@ -5,7 +5,20 @@ import { Clock3, Fingerprint, Hash, KeyRound, MonitorSmartphone, Network, QrCode
 import { confirmDialog } from './appDialogStore'
 import { SettingsButton, SettingsCard, SettingsIconButton, SettingsMessage, SettingsNumber, SettingsPill, SettingsRow, SettingsSwitch, SettingsValue } from './settings/controls'
 
-type RemoteDevice = { id: string; name: string; createdAt: number; lastSeenAt: number }
+type RemoteDevice = { id: string; name: string; createdAt: number; lastSeenAt: number; grants: string[] }
+
+/** Order matches the remote-v2 capability list; admin last and clearly marked. */
+const GRANT_OPTIONS: Array<{ id: string; label: string }> = [
+  { id: 'terminal.view', label: '터미널 보기' },
+  { id: 'terminal.input', label: '터미널 입력' },
+  { id: 'orchestration.view', label: '에이전트/런 보기' },
+  { id: 'orchestration.control', label: '에이전트/런 제어' },
+  { id: 'files.view', label: '파일 보기' },
+  { id: 'git.write', label: 'Git 쓰기' },
+  { id: 'browser.view', label: '브라우저 보기' },
+  { id: 'browser.control', label: '브라우저 제어' },
+  { id: 'admin', label: '관리자(모든 권한)' },
+]
 type RemoteStatus = {
   enabled: boolean
   running: boolean
@@ -142,6 +155,20 @@ export function RemoteSettings() {
     setQrUrl(await QRCode.toDataURL(next.qrPayload, { margin: 4, width: 720 }))
   })
 
+  const toggleGrant = (device: RemoteDevice, grant: string) => void run(async () => {
+    const next = device.grants.includes(grant)
+      ? device.grants.filter((value) => value !== grant)
+      : [...device.grants, grant]
+    const confirmed = await confirmDialog({
+      title: '기기 권한 변경',
+      message: `${device.name}의 권한을 저장하면 기기 연결이 끊기고 다시 연결됩니다.`,
+      confirmLabel: '저장',
+    })
+    if (!confirmed) return
+    await invoke('remote_set_device_grants', { deviceId: device.id, grants: next })
+    await refresh()
+  })
+
   const revoke = (deviceId: string) => void run(async () => {
     await invoke('remote_revoke_device', { deviceId })
     await refresh()
@@ -248,13 +275,27 @@ export function RemoteSettings() {
 
       <SettingsCard icon={MonitorSmartphone} title="페어링된 기기">
         {status?.devices.length ? status.devices.map((device) => (
-          <SettingsRow
-            key={device.id}
-            icon={Smartphone}
-            label={device.name}
-            sub={`Last seen ${new Date(device.lastSeenAt * 1000).toLocaleString()}`}
-            control={<SettingsIconButton icon={Trash2} label={`Revoke ${device.name}`} tone="danger" disabled={busy} onClick={() => revoke(device.id)} />}
-          />
+          <div key={device.id} className="remote-device-entry">
+            <SettingsRow
+              icon={Smartphone}
+              label={device.name}
+              sub={`Last seen ${new Date(device.lastSeenAt * 1000).toLocaleString()}`}
+              control={<SettingsIconButton icon={Trash2} label={`Revoke ${device.name}`} tone="danger" disabled={busy} onClick={() => revoke(device.id)} />}
+            />
+            <div className="remote-grant-editor" role="group" aria-label={`${device.name} 권한`}>
+              {GRANT_OPTIONS.map((grant) => (
+                <label key={grant.id} className={device.grants.includes(grant.id) ? 'is-granted' : undefined}>
+                  <input
+                    type="checkbox"
+                    checked={device.grants.includes(grant.id)}
+                    disabled={busy}
+                    onChange={() => toggleGrant(device, grant.id)}
+                  />
+                  {grant.label}
+                </label>
+              ))}
+            </div>
+          </div>
         )) : <SettingsMessage>페어링된 기기 없음</SettingsMessage>}
       </SettingsCard>
 

@@ -59,6 +59,7 @@ function selectorState(overrides: Partial<AgentPaneStatusesSelectorState> = {}):
     panes: { 'pane-1': pane() },
     settings: defaultSettings,
     paneAgentActivity: {},
+    paneScreenStates: {},
     attentionSnapshot: null,
     paneCompletionHighlights: {},
     ...overrides,

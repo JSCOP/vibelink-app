@@ -3861,6 +3861,14 @@ pub(super) fn dispatch_message(
             }
             send_ok(tx, req)
         }
+        ClientToDaemon::ReportPaneScreenState {
+            req,
+            pane_id,
+            state: screen_state,
+        } => {
+            lock_state(&state).set_pane_screen_state(pane_id, screen_state);
+            send_ok(tx, req)
+        }
         ClientToDaemon::Control {
             req,
             operation_id,
@@ -4620,6 +4628,22 @@ fn dispatch_remote_request(
             remote.revoke_device(device_id)?;
             Ok(Value::Null)
         }
+        "setDeviceGrants" => {
+            let device_id = request
+                .get("deviceId")
+                .and_then(Value::as_str)
+                .context("deviceId is required")?;
+            let grants = request
+                .get("grants")
+                .and_then(Value::as_array)
+                .context("grants array is required")?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let epoch = remote.update_device_grants(device_id, grants)?;
+            Ok(serde_json::json!({ "revocationEpoch": epoch }))
+        }
         "regenerateIdentity" => Ok(serde_json::to_value(remote.regenerate_identity()?)?),
         "paneLease" => {
             let pane_id = request
@@ -4688,6 +4712,7 @@ pub(super) fn request_id(msg: &ClientToDaemon) -> Option<crate::protocol::Req> {
         | ClientToDaemon::CancelPaneSpawn { req, .. }
         | ClientToDaemon::AttachPane { req, .. }
         | ClientToDaemon::WritePane { req, .. }
+        | ClientToDaemon::ReportPaneScreenState { req, .. }
         | ClientToDaemon::SetPaneTitle { req, .. }
         | ClientToDaemon::SetPaneRole { req, .. }
         | ClientToDaemon::ClosePane { req, .. }

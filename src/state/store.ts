@@ -9,7 +9,7 @@ import { loadManualPaneTitles, normalizePaneTitle, persistManualPaneTitles, shou
 import { daemonErrorMessage } from '../ipc/daemonErrors'
 import type { Settings } from './profiles'
 import type { AttentionSnapshot } from './worktreeAttention'
-import type { AgentPaneActivity } from './agentPaneStatus'
+import type { AgentPaneActivity, PaneScreenState } from './agentPaneStatus'
 import type { WorktreeBlockerKind, WorktreeCheckpoint, WorktreeCheckpointKind, WorktreeCreateRequest, WorktreeCreateResult, WorktreeProjection, WorktreeRecord, WorktreeRemovalPreflight, WorktreeRemovalResult, WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetupPolicy } from '../ipc/worktrees'
 import { cancelWorktreeOperation, createWorktree, createWorktreeCheckpoint, importWorktree, listWorktrees, moveWorktree, preflightWorktreeRemoval as preflightWorktreeRemovalIpc, putWorktreeReviewComment as putWorktreeReviewCommentIpc, reconcileWorktrees, removeWorktree, setWorktreeMetadata as setWorktreeMetadataIpc } from '../ipc/worktrees'
 import type { LegacyWorkspaceWorktree, PendingWorktreeCreation } from './worktrees'
@@ -155,6 +155,8 @@ type WorkspaceState = {
   hermesModels: Record<string, HermesModelsState>
   hermesPendingPrompts: Record<string, HermesPendingPrompt[]>
   hermesGenerations: Record<string, number>
+  /** Screen-content agent state per pane (herdr-style detection). */
+  paneScreenStates: Record<string, PaneScreenState>
   /** Durable chat id per workspace for the active provider chat. */
   hermesChatIds: Record<string, string>
   hermesCurrentSession: Record<string, string>
@@ -259,6 +261,7 @@ type WorkspaceState = {
   setHermesModels: (sessionId: string, models: { available: HermesModelInfo[]; current: string }) => void
   setHermesStatus: (sessionId: string, status: HermesStatus) => void
   setHermesGeneration: (sessionId: string, generation: number) => void
+  setPaneScreenState: (paneId: string, state: PaneScreenState | null) => void
   setHermesChatId: (sessionId: string, chatId: string) => void
   hydrateHermesTranscript: (sessionId: string, turns: HermesTurn[]) => void
   enqueueHermesPrompt: (sessionId: string, text: string) => void
@@ -301,6 +304,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesPermissions: {},
   hermesUsage: {},
   hermesGenerations: {},
+  paneScreenStates: {},
   hermesChatIds: {},
   hermesModels: {},
   hermesPendingPrompts: {},
@@ -1331,6 +1335,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   setHermesStatus: (sessionId: string, status: HermesStatus) => {
     set((state) => ({ hermesStatus: { ...state.hermesStatus, [sessionId]: status } }))
+  },
+  setPaneScreenState: (paneId: string, state: PaneScreenState | null) => {
+    set((store) => {
+      const previous = store.paneScreenStates[paneId]
+      if (state === null) {
+        if (!previous) return store
+        const next = { ...store.paneScreenStates }
+        delete next[paneId]
+        return { paneScreenStates: next }
+      }
+      if (previous && previous.state === state.state) return store
+      return { paneScreenStates: { ...store.paneScreenStates, [paneId]: state } }
+    })
   },
   hydrateHermesTranscript: (sessionId: string, turns: HermesTurn[]) => {
     set((state) => {

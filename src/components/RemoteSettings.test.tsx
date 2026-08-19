@@ -18,7 +18,7 @@ const status = {
   lanEnabled: true,
   fingerprint: 'abcdefghijklmnopqrstuvwxyz',
   hosts: ['192.168.1.10'],
-  devices: [{ id: 'device-1', name: 'Pixel', createdAt: 1, lastSeenAt: 2 }],
+  devices: [{ id: 'device-1', name: 'Pixel', createdAt: 1, lastSeenAt: 2, grants: ['terminal.view', 'terminal.input'] }],
 }
 
 const commands = () => invoke.mock.calls.map(([command]) => command as string)

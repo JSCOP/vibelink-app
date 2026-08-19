@@ -15,7 +15,8 @@ const sourceBudgets = {
   // +37: writes cut on DEC 2026 synchronized-frame boundaries instead of the raw
   // byte budget, with a bounded hold for a frame whose end has not arrived.
   // 2026-08-20: +16 lines for coalesced input-batch flush (one write_pane per queued burst).
-  'src/terminal/TerminalManager.ts': 2_461,
+  // 2026-08-20: +screen-state detection scheduling hooks.
+  'src/terminal/TerminalManager.ts': 2_472,
   'src/state/store.ts': 2_197,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_568,
@@ -24,7 +25,8 @@ const sourceBudgets = {
   // Keeps pending download records joinable after the manager tests moved out.
   'src-tauri/src/browser/manager.rs': 3_147,
   // Rebasing a pane's scrollback onto a GUI-rendered snapshot.
-  'src-tauri/src/daemon/session.rs': 3_086,
+  // 2026-08-20: +screen-state overlay (herdr-style GUI detection merged into attention).
+  'src-tauri/src/daemon/session.rs': 3_120,
   'src-tauri/src/browser/provider.rs': 2_834,
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
@@ -49,7 +51,8 @@ const sourceBudgets = {
   'src-tauri/src/app/daemon_client.rs': 1_210,
   'src-tauri/src/app/fsops.rs': 1_704,
   // One arm per protocol message, so SetPaneSnapshot costs ten lines here.
-  'src-tauri/src/daemon/dispatch.rs': 4_776,
+  // 2026-08-20: +ReportPaneScreenState and setDeviceGrants dispatch arms.
+  'src-tauri/src/daemon/dispatch.rs': 4_815,
   'src-tauri/src/daemon/tests.rs': 1_580,
   'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
   'src-tauri/src/app/provider_integrations.rs': 2_056,

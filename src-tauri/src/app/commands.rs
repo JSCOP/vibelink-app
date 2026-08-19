@@ -326,6 +326,18 @@ pub async fn remote_revoke_device(
 }
 
 #[tauri::command]
+pub async fn remote_set_device_grants(
+    client: State<'_, DaemonClient>,
+    device_id: String,
+    grants: Vec<String>,
+) -> Result<(), String> {
+    remote_request(
+        &client,
+        json!({ "action": "setDeviceGrants", "deviceId": device_id, "grants": grants }),
+    )
+}
+
+#[tauri::command]
 pub async fn remote_regenerate_identity(
     client: State<'_, DaemonClient>,
 ) -> Result<RemoteStatus, String> {
@@ -831,6 +843,29 @@ pub async fn write_pane(
         data: data.into_bytes(),
         origin: PaneCommandOrigin::Desktop,
     }))
+}
+
+#[tauri::command]
+pub async fn report_pane_screen_state(
+    client: State<'_, DaemonClient>,
+    pane_id: String,
+    state: Option<String>,
+) -> Result<(), String> {
+    let pane_id = parse_uuid(&pane_id).map_err(to_string)?;
+    let state = match state.as_deref() {
+        None => None,
+        Some("working") => Some(crate::protocol::AttentionPaneState::Working),
+        Some("blocked") => Some(crate::protocol::AttentionPaneState::Blocked),
+        Some("idle") => Some(crate::protocol::AttentionPaneState::Idle),
+        Some(other) => return Err(format!("unknown screen state {other}")),
+    };
+    expect_ok(
+        client.request_reply(|req| ClientToDaemon::ReportPaneScreenState {
+            req,
+            pane_id,
+            state: state.clone(),
+        }),
+    )
 }
 
 #[tauri::command]

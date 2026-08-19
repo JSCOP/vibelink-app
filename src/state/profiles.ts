@@ -469,6 +469,31 @@ export function isAgentProfile(profile: Profile): boolean {
   return agentNamePhrasePattern.test(haystack) || agentCommandNames.some((command) => new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack))
 }
 
+/** Which detection manifest fits this pane's agent CLI, or null when the
+ *  pane is not recognizably one of the supported agents. */
+export function agentKindForPane(pane: PaneMeta): string | null {
+  const haystack = [
+    pane.config.title ?? '',
+    pane.config.shell ?? '',
+    ...(pane.config.args ?? []),
+  ].join(' ').toLowerCase()
+  const profileId = pane.config.profileId?.trim()
+  const kinds: Array<[string, RegExp]> = [
+    ['claude', /(^|[\s\\/"'])claude([\s\\/"']|$|\.)/],
+    ['codex', /(^|[\s\\/"'])codex([\s\\/"']|$|\.)/],
+    ['opencode', /(^|[\s\\/"'])opencode([\s\\/"']|$|\.)/],
+    ['gemini', /(^|[\s\\/"'])gemini([\s\\/"']|$|\.)/],
+    ['github-copilot', /(^|[\s\\/"'])copilot([\s\\/"']|$|\.)/],
+    ['hermes', /(^|[\s\\/"'])hermes([\s\\/"']|$|\.)/],
+    ['pi', /(^|[\s\\/"'])pi([\s\\/"']|$|\.)/],
+  ]
+  if (profileId === 'claude' || profileId === 'codex') return profileId
+  for (const [kind, pattern] of kinds) {
+    if (pattern.test(haystack)) return kind
+  }
+  return null
+}
+
 export function isAgentPane(pane: PaneMeta, settings: Settings): boolean {
   const profileId = pane.config.profileId?.trim()
   if (profileId) {

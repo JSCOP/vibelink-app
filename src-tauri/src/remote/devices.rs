@@ -406,18 +406,13 @@ fn initial_revocation_epoch() -> u64 {
 }
 
 fn remote_v2_default_grants() -> Vec<String> {
+    // Least privilege, and what the contract's `defaultPairingGrants` declares.
+    // A freshly paired phone sees only the terminal; everything else is granted
+    // per device in Settings > Remote. Handing out `admin` on pairing made the
+    // grant model decorative.
     vec![
         TERMINAL_VIEW_GRANT.to_string(),
         TERMINAL_INPUT_GRANT.to_string(),
-        "orchestration.view".to_string(),
-        "orchestration.control".to_string(),
-        "browser.view".to_string(),
-        "browser.control".to_string(),
-        "files.view".to_string(),
-        "git.write".to_string(),
-        "computer.observe".to_string(),
-        "computer.control".to_string(),
-        "admin".to_string(),
     ]
 }
 

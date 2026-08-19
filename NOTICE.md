@@ -38,3 +38,10 @@ The agent brand marks shipped under `public/agent-icons/` are trademarks of thei
 - **Upstream license notice:** <https://github.com/NousResearch/hermes-agent/blob/main/LICENSE>
 
 The Hermes brand icon used by VibeLink is listed separately in `public/agent-icons/SOURCES.txt`; the Hermes Agent program itself is not bundled with VibeLink.
+
+## herdr agent-detection manifests
+
+- **Component:** screen-content agent state detection rules and engine design, ported to TypeScript in `src/terminal/agentScreenDetect.ts`
+- **Source:** https://github.com/herdrdev/herdr (`src/detect/`)
+- **Copyright holder:** the herdr contributors
+- **License:** Apache License 2.0
