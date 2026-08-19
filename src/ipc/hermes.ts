@@ -2,8 +2,9 @@ import { Channel, invoke } from '@tauri-apps/api/core'
 import type { HermesModelInfo, HermesPermissionOption, HermesRuntimeStatus } from './types'
 import { useWorkspaceStore } from '../state/store'
 import type { HermesPendingPrompt, HermesPlanEntry, HermesSessionInfo } from '../state/hermes'
+import { turnsFromTimeline, type AgentTimelineRow } from '../state/hermesTranscript'
 
-export type HermesEvent = { generation: number } & (
+export type HermesEvent = { generation: number; chatId: string } & (
   | { kind: 'started'; sessionId: string; acpSessionId: string }
   | { kind: 'sessionReplay'; sessionId: string; acpSessionId: string }
   | { kind: 'userMessage'; sessionId: string; text: string }
@@ -20,7 +21,7 @@ export type HermesEvent = { generation: number } & (
   | { kind: 'exited'; sessionId: string }
 )
 
-type HermesStartResult = { generation: number }
+type HermesStartResult = { generation: number; chatId: string }
 
 
 /** Setup-required failures (no provider/model configured yet) are guided inline
@@ -36,6 +37,7 @@ const DEFAULT_START_TIMEOUT_MS = 60_000
 
 export type StartHermesAgentInput = {
   sessionId: string
+  provider?: 'hermes' | 'claude-code'
   commandOverride?: string | null
   workspaceFolder?: string | null
   timeoutMs?: number
@@ -48,6 +50,7 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
 
   const channel = new Channel<HermesEvent>((event) => {
     const store = useWorkspaceStore.getState()
+    if (event.chatId) store.setHermesChatId(event.sessionId, event.chatId)
     const currentGeneration = store.hermesGenerations[event.sessionId]
     if (currentGeneration !== undefined && event.generation < currentGeneration) return
     if (currentGeneration !== event.generation) store.setHermesGeneration(event.sessionId, event.generation)
@@ -109,17 +112,18 @@ export async function startHermesOutputStream(options: { force?: boolean } = {})
   await nextRegistration
 }
 
-export async function startHermesAgent({ sessionId, commandOverride = null, workspaceFolder = null, timeoutMs = DEFAULT_START_TIMEOUT_MS, restartOnTimeout = true }: StartHermesAgentInput): Promise<void> {
+export async function startHermesAgent({ sessionId, provider = 'hermes', commandOverride = null, workspaceFolder = null, timeoutMs = DEFAULT_START_TIMEOUT_MS, restartOnTimeout = true }: StartHermesAgentInput): Promise<void> {
   const currentStatus = useWorkspaceStore.getState().hermesStatus[sessionId]
   if ((currentStatus === 'running' || currentStatus === 'busy') && useWorkspaceStore.getState().hermesGenerations[sessionId] !== undefined) return
   const existing = startPromises.get(sessionId)
   if (existing) return existing
 
-  const task = startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
+  const task = startHermesAgentOnce({ sessionId, provider, commandOverride, workspaceFolder, timeoutMs })
     .catch(async (error) => {
       if (!restartOnTimeout || !isStartTimeout(error)) throw error
-      await invoke('agent_chat_stop', { sessionId }).catch(() => undefined)
-      return startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs })
+      const staleChatId = useWorkspaceStore.getState().hermesChatIds[sessionId]
+      if (staleChatId) await invoke('agent_chat_stop', { chatId: staleChatId }).catch(() => undefined)
+      return startHermesAgentOnce({ sessionId, provider, commandOverride, workspaceFolder, timeoutMs })
     })
     .finally(() => {
       if (startPromises.get(sessionId) === task) startPromises.delete(sessionId)
@@ -135,12 +139,12 @@ export function getHermesRuntimeStatus(commandOverride?: string | null): Promise
 }
 
 export function setHermesModel(sessionId: string, modelId: string): Promise<void> {
-  return invoke('agent_chat_set_model', { sessionId, generation: requiredHermesGeneration(sessionId), modelId })
+  return invoke('agent_chat_set_model', { chatId: requiredHermesChatId(sessionId), generation: requiredHermesGeneration(sessionId), modelId })
 }
 export async function dispatchHermesPrompt(sessionId: string, prompt: HermesPendingPrompt): Promise<void> {
   try {
     await invoke('agent_chat_send', {
-      sessionId,
+      chatId: requiredHermesChatId(sessionId),
       generation: requiredHermesGeneration(sessionId),
       text: prompt.text,
     })
@@ -155,7 +159,7 @@ export async function dispatchHermesPrompt(sessionId: string, prompt: HermesPend
 export async function hermesNewSession(input: StartHermesAgentInput): Promise<string> {
   await startHermesAgent(input)
   const generation = requiredHermesGeneration(input.sessionId)
-  const acpId = await invoke<string>('agent_chat_new_session', { sessionId: input.sessionId, generation })
+  const acpId = await invoke<string>('agent_chat_new_session', { chatId: requiredHermesChatId(input.sessionId), generation })
   if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   const store = useWorkspaceStore.getState()
   store.setHermesCurrentSession(input.sessionId, acpId)
@@ -167,7 +171,7 @@ export async function hermesNewSession(input: StartHermesAgentInput): Promise<st
 export async function hermesResumeSession(input: StartHermesAgentInput, acpSessionId: string): Promise<void> {
   await startHermesAgent(input)
   const generation = requiredHermesGeneration(input.sessionId)
-  await invoke('agent_chat_resume_session', { sessionId: input.sessionId, generation, acpSessionId })
+  await invoke('agent_chat_resume_session', { chatId: requiredHermesChatId(input.sessionId), generation, acpSessionId })
   if (useWorkspaceStore.getState().hermesGenerations[input.sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
   useWorkspaceStore.getState().setHermesCurrentSession(input.sessionId, acpSessionId)
 }
@@ -176,7 +180,7 @@ export function hermesRefreshSessions(sessionId: string): Promise<void> {
   const existing = sessionRefreshPromises.get(sessionId)
   if (existing) return existing
   const generation = requiredHermesGeneration(sessionId)
-  const task = invoke<HermesSessionInfo[]>('agent_chat_list_sessions', { sessionId, generation })
+  const task = invoke<HermesSessionInfo[]>('agent_chat_list_sessions', { chatId: requiredHermesChatId(sessionId), generation })
     .then((list) => {
       if (useWorkspaceStore.getState().hermesGenerations[sessionId] !== generation) throw new Error('HERMES_SESSION_REPLACED')
       useWorkspaceStore.getState().setHermesSessions(sessionId, list)
@@ -188,11 +192,12 @@ export function hermesRefreshSessions(sessionId: string): Promise<void> {
   return task
 }
 
-async function startHermesAgentOnce({ sessionId, commandOverride, workspaceFolder, timeoutMs }: Required<Pick<StartHermesAgentInput, 'sessionId' | 'timeoutMs'>> & Pick<StartHermesAgentInput, 'commandOverride' | 'workspaceFolder'>): Promise<void> {
+async function startHermesAgentOnce({ sessionId, provider, commandOverride, workspaceFolder, timeoutMs }: Required<Pick<StartHermesAgentInput, 'sessionId' | 'provider' | 'timeoutMs'>> & Pick<StartHermesAgentInput, 'commandOverride' | 'workspaceFolder'>): Promise<void> {
   const store = useWorkspaceStore.getState()
   await startHermesOutputStream({ force: true })
   store.setHermesStatus(sessionId, 'starting')
-  const result = await invoke<HermesStartResult>('agent_chat_start', { sessionId, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
+  const result = await invoke<HermesStartResult>('agent_chat_start', { sessionId, provider, commandOverride: commandOverride || null, workspaceFolder: workspaceFolder ?? null })
+  store.setHermesChatId(sessionId, result.chatId)
   store.setHermesGeneration(sessionId, result.generation)
   await waitForHermesReady(sessionId, result.generation, timeoutMs)
 }
@@ -238,6 +243,44 @@ function requiredHermesGeneration(sessionId: string): number {
   return generation
 }
 
+function requiredHermesChatId(sessionId: string): string {
+  const chatId = useWorkspaceStore.getState().hermesChatIds[sessionId]
+  if (!chatId) throw new Error('Hermes ACP session is not ready')
+  return chatId
+}
+
 function isStartTimeout(error: unknown): boolean {
   return String(error).includes('did not become ready')
+}
+
+export type AgentChatInfo = {
+  chatId: string
+  sessionId: string
+  provider: 'hermes' | 'claude-code'
+  acpSessionId: string | null
+  cwd: string
+  title: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** Paints the latest durable chat's history without starting the agent.
+ *  Returns the chat so the panel can preselect its provider. */
+export async function loadAgentChatHistory(sessionId: string): Promise<AgentChatInfo | null> {
+  const chats = await invoke<AgentChatInfo[]>('agent_chat_list', { sessionId }).catch(() => [])
+  const latest = chats[0]
+  if (!latest) return null
+  const store = useWorkspaceStore.getState()
+  store.setHermesChatId(sessionId, latest.chatId)
+  const page = await invoke<{ entries: AgentTimelineRow[]; lastSeq: number }>('agent_chat_timeline', {
+    sessionId,
+    chatId: latest.chatId,
+    afterSeq: 0,
+    limit: 500,
+  }).catch(() => null)
+  if (page && page.entries.length > 0) {
+    store.hydrateHermesTranscript(sessionId, turnsFromTimeline(page.entries))
+    if (latest.acpSessionId) store.setHermesCurrentSession(sessionId, latest.acpSessionId)
+  }
+  return latest
 }

@@ -26,6 +26,7 @@ describe('Hermes ACP startup', () => {
       hermesUsage: {},
       hermesModels: {},
       hermesGenerations: {},
+      hermesChatIds: {},
       hermesPendingPrompts: {},
       hermesCurrentSession: {},
       hermesSessions: {},
@@ -36,8 +37,8 @@ describe('Hermes ACP startup', () => {
   test('marks ACP starting and waits for the backend started event before resolving', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'agent_chat_start') {
-        queueMicrotask(() => emitHermesEvent?.({ generation: 1, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
-        return { generation: 1 }
+        queueMicrotask(() => emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
+        return { generation: 1, chatId: 'chat-a' }
       }
       return null
     })
@@ -46,7 +47,7 @@ describe('Hermes ACP startup', () => {
     await startHermesAgent({ sessionId: 'session-a', workspaceFolder: 'E:/repo', commandOverride: 'hermes-acp', timeoutMs: 100 })
 
     expect(invoke).toHaveBeenCalledWith('init_agent_chat_output', expect.any(Object))
-    expect(invoke).toHaveBeenCalledWith('agent_chat_start', { sessionId: 'session-a', commandOverride: 'hermes-acp', workspaceFolder: 'E:/repo' })
+    expect(invoke).toHaveBeenCalledWith('agent_chat_start', { sessionId: 'session-a', provider: 'hermes', commandOverride: 'hermes-acp', workspaceFolder: 'E:/repo' })
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
   })
 
@@ -54,11 +55,11 @@ describe('Hermes ACP startup', () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'agent_chat_start') {
         queueMicrotask(() => {
-          emitHermesEvent?.({ generation: 1, kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-a' })
-          emitHermesEvent?.({ generation: 1, kind: 'userMessage', sessionId: 'session-a', text: 'hello' })
-          emitHermesEvent?.({ generation: 1, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' })
+          emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-a' })
+          emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'userMessage', sessionId: 'session-a', text: 'hello' })
+          emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' })
         })
-        return { generation: 1 }
+        return { generation: 1, chatId: 'chat-a' }
       }
       if (command === 'agent_chat_list_sessions') return [{ id: 'acp-a', title: null, updatedAt: '2026-07-18T00:00:00.000Z', cwd: 'E:/repo' }]
       return null
@@ -76,23 +77,23 @@ describe('Hermes ACP startup', () => {
   test('explicit resume replaces transcript from replay events', async () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'agent_chat_resume_session') {
-        emitHermesEvent?.({ generation: 1, kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-b' })
-        emitHermesEvent?.({ generation: 1, kind: 'userMessage', sessionId: 'session-a', text: 'restored prompt' })
-        emitHermesEvent?.({ generation: 1, kind: 'message', sessionId: 'session-a', text: 'restored answer' })
+        emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'sessionReplay', sessionId: 'session-a', acpSessionId: 'acp-b' })
+        emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'userMessage', sessionId: 'session-a', text: 'restored prompt' })
+        emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'message', sessionId: 'session-a', text: 'restored answer' })
       }
       return null
     })
     useWorkspaceStore.setState({
       hermesStatus: { 'session-a': 'running' },
       hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
-      hermesGenerations: { 'session-a': 1 },
+      hermesGenerations: { 'session-a': 1 }, hermesChatIds: { 'session-a': 'chat-a' },
     })
     const { hermesResumeSession, startHermesOutputStream } = await import('./hermes')
     await startHermesOutputStream({ force: true })
 
     await hermesResumeSession({ sessionId: 'session-a', timeoutMs: 100 }, 'acp-b')
 
-    expect(invoke).toHaveBeenCalledWith('agent_chat_resume_session', { sessionId: 'session-a', generation: 1, acpSessionId: 'acp-b' })
+    expect(invoke).toHaveBeenCalledWith('agent_chat_resume_session', { chatId: 'chat-a', generation: 1, acpSessionId: 'acp-b' })
     expect(useWorkspaceStore.getState().hermesCurrentSession['session-a']).toBe('acp-b')
     expect(useWorkspaceStore.getState().hermesTranscript['session-a']).toEqual([
       { role: 'user', text: 'restored prompt', thoughts: '', toolCalls: [] },
@@ -111,7 +112,7 @@ describe('Hermes ACP startup', () => {
       hermesTranscript: { 'session-a': [{ role: 'user', text: 'old', thoughts: '', toolCalls: [] }] },
       hermesPermissions: { 'session-a': [{ requestId: 7, generation: 1, title: 'Old permission', toolKind: 'edit', options: [] }] },
       hermesUsage: { 'session-a': { size: 100, used: 90 } },
-      hermesGenerations: { 'session-a': 1 },
+      hermesGenerations: { 'session-a': 1 }, hermesChatIds: { 'session-a': 'chat-a' },
     })
     const { hermesNewSession } = await import('./hermes')
 
@@ -130,7 +131,7 @@ describe('Hermes ACP startup', () => {
       if (command === 'agent_chat_list_sessions') await new Promise<void>((resolve) => { releaseList = resolve })
       return []
     })
-    useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 1 } })
+    useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 1 }, hermesChatIds: { 'session-a': 'chat-a' } })
     const { hermesRefreshSessions } = await import('./hermes')
 
     const first = hermesRefreshSessions('session-a')
@@ -147,8 +148,8 @@ describe('Hermes ACP startup', () => {
     vi.mocked(invoke).mockImplementation(async (command: string) => {
       if (command === 'agent_chat_start') {
         await new Promise<void>((resolve) => { releaseStart = resolve })
-        queueMicrotask(() => emitHermesEvent?.({ generation: 1, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
-        return { generation: 1 }
+        queueMicrotask(() => emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-a' }))
+        return { generation: 1, chatId: 'chat-a' }
       }
     })
     const { startHermesAgent } = await import('./hermes')
@@ -169,6 +170,7 @@ describe('Hermes ACP startup', () => {
 
     emitHermesEvent?.({
       generation: 1,
+      chatId: 'chat-a',
       kind: 'error',
       sessionId: 'session-a',
       message: 'Hermes request session/new failed: {"code":-32603,"data":{"details":"No LLM provider configured. Run `hermes model` to select a provider, or run `hermes setup` for first-time configuration."},"message":"Internal error"}',
@@ -183,7 +185,7 @@ describe('Hermes ACP startup', () => {
     const { startHermesOutputStream } = await import('./hermes')
     await startHermesOutputStream({ force: true })
 
-    emitHermesEvent?.({ generation: 1, kind: 'error', sessionId: 'session-a', message: 'Hermes stdout stopped: broken pipe' })
+    emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'error', sessionId: 'session-a', message: 'Hermes stdout stopped: broken pipe' })
 
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('error')
     expect(useWorkspaceStore.getState().error).toBe('Hermes: Hermes stdout stopped: broken pipe')
@@ -196,9 +198,9 @@ describe('Hermes ACP startup', () => {
         startAttempts += 1
         const generation = startAttempts
         if (startAttempts === 2) {
-          queueMicrotask(() => emitHermesEvent?.({ generation, kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-b' }))
+          queueMicrotask(() => emitHermesEvent?.({ generation, chatId: 'chat-a', kind: 'started', sessionId: 'session-a', acpSessionId: 'acp-b' }))
         }
-        return { generation }
+        return { generation, chatId: 'chat-a' }
       }
     })
     const { startHermesAgent } = await import('./hermes')
@@ -206,7 +208,7 @@ describe('Hermes ACP startup', () => {
     await startHermesAgent({ sessionId: 'session-a', timeoutMs: 1 })
 
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_start')).toHaveLength(2)
-    expect(invoke).toHaveBeenCalledWith('agent_chat_stop', { sessionId: 'session-a' })
+    expect(invoke).toHaveBeenCalledWith('agent_chat_stop', { chatId: 'chat-a' })
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
   })
 
@@ -219,7 +221,7 @@ describe('Hermes ACP startup', () => {
       }
       return null
     })
-    useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 3 } })
+    useWorkspaceStore.setState({ hermesGenerations: { 'session-a': 3 }, hermesChatIds: { 'session-a': 'chat-a' } })
     useWorkspaceStore.getState().enqueueHermesPrompt('session-a', 'retry me')
     const first = useWorkspaceStore.getState().claimHermesPrompt('session-a')!
     const { dispatchHermesPrompt } = await import('./hermes')
@@ -235,8 +237,8 @@ describe('Hermes ACP startup', () => {
 
     expect(useWorkspaceStore.getState().hermesPendingPrompts['session-a']).toEqual([])
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'agent_chat_send')).toEqual([
-      ['agent_chat_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
-      ['agent_chat_send', { sessionId: 'session-a', generation: 3, text: 'retry me' }],
+      ['agent_chat_send', { chatId: 'chat-a', generation: 3, text: 'retry me' }],
+      ['agent_chat_send', { chatId: 'chat-a', generation: 3, text: 'retry me' }],
     ])
   })
 
@@ -248,8 +250,8 @@ describe('Hermes ACP startup', () => {
       hermesStatus: { 'session-a': 'running' },
     })
 
-    emitHermesEvent?.({ generation: 1, kind: 'error', sessionId: 'session-a', message: 'old failure' })
-    emitHermesEvent?.({ generation: 1, kind: 'exited', sessionId: 'session-a' })
+    emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'error', sessionId: 'session-a', message: 'old failure' })
+    emitHermesEvent?.({ generation: 1, chatId: 'chat-a', kind: 'exited', sessionId: 'session-a' })
 
     expect(useWorkspaceStore.getState().hermesStatus['session-a']).toBe('running')
     expect(useWorkspaceStore.getState().error).toBeUndefined()

@@ -11,7 +11,7 @@ use std::{
 };
 use uuid::Uuid;
 
-const CONTROL_SCHEMA_VERSION: i64 = 10;
+const CONTROL_SCHEMA_VERSION: i64 = 11;
 const MAX_BACKUPS: usize = 3;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -174,6 +174,36 @@ pub enum ControlCommand {
         purpose: String,
         notes: String,
     },
+    AgentChatEnsure {
+        session_id: String,
+        provider: String,
+        cwd: String,
+        new_chat_id: String,
+        initial_acp_session_id: Option<String>,
+    },
+    AgentChatList {
+        session_id: String,
+    },
+    AgentChatSetAcpSession {
+        session_id: String,
+        chat_id: String,
+        acp_session_id: String,
+    },
+    AgentChatDelete {
+        session_id: String,
+        chat_id: String,
+    },
+    AgentTimelineAppend {
+        session_id: String,
+        chat_id: String,
+        entries: Vec<crate::agent_timeline::AgentTimelineEntry>,
+    },
+    AgentTimelineFetch {
+        session_id: String,
+        chat_id: String,
+        after_seq: i64,
+        limit: i64,
+    },
 }
 
 impl ControlCommand {
@@ -187,7 +217,13 @@ impl ControlCommand {
             | Self::TaskDone { session_id, .. }
             | Self::TaskNote { session_id, .. }
             | Self::BriefGet { session_id }
-            | Self::BriefSet { session_id, .. } => session_id,
+            | Self::BriefSet { session_id, .. }
+            | Self::AgentChatEnsure { session_id, .. }
+            | Self::AgentChatList { session_id }
+            | Self::AgentChatSetAcpSession { session_id, .. }
+            | Self::AgentChatDelete { session_id, .. }
+            | Self::AgentTimelineAppend { session_id, .. }
+            | Self::AgentTimelineFetch { session_id, .. } => session_id,
         }
     }
 
@@ -201,11 +237,30 @@ impl ControlCommand {
             Self::TaskDone { .. } => "work_item.completed",
             Self::TaskNote { .. } => "work_item.noted",
             Self::BriefSet { .. } => "workspace_brief.updated",
+            Self::AgentChatList { .. } | Self::AgentTimelineFetch { .. } => "control.read",
+            Self::AgentChatEnsure { .. } => "agent_chat.ensured",
+            Self::AgentChatSetAcpSession { .. } => "agent_chat.session_bound",
+            Self::AgentChatDelete { .. } => "agent_chat.deleted",
+            Self::AgentTimelineAppend { .. } => "agent_timeline.appended",
         }
     }
 
     fn mutates(&self) -> bool {
-        !matches!(self, Self::BoardRead { .. } | Self::BriefGet { .. })
+        !matches!(
+            self,
+            Self::BoardRead { .. }
+                | Self::BriefGet { .. }
+                | Self::AgentChatList { .. }
+                | Self::AgentTimelineFetch { .. }
+        )
+    }
+
+    /// Timeline appends stream one row per coalesced chat part; recording each in
+    /// `operations`/`run_events` (which never prune) would grow those tables
+    /// without bound. Appends are ordered inside their own transaction, so they
+    /// skip the idempotency bookkeeping.
+    fn records_operation(&self) -> bool {
+        self.mutates() && !matches!(self, Self::AgentTimelineAppend { .. })
     }
 }
 
@@ -215,6 +270,10 @@ pub enum ControlResponse {
     Board(BoardDoc),
     Task(Task),
     Brief(Option<Brief>),
+    AgentChat(crate::agent_timeline::AgentChatInfo),
+    AgentChats(Vec<crate::agent_timeline::AgentChatInfo>),
+    AgentTimeline(crate::agent_timeline::AgentTimelinePage),
+    TimelineAppended { last_seq: i64 },
     Ack,
 }
 
@@ -279,7 +338,12 @@ impl ControlPlane {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let session_id = command.session_id().to_string();
         let event_type = command.event_type();
+        let records_operation = command.records_operation();
         let response = execute_mutation(&transaction, command)?;
+        if !records_operation {
+            transaction.commit()?;
+            return Ok(response);
+        }
         let response_json = serde_json::to_string(&response)?;
         transaction.execute(
             "INSERT INTO operations(operation_id, request_hash, response_json, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -885,6 +949,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         connection.execute("DELETE FROM notifications", [])?;
     }
     migrate_worktree_review_state_v10(connection)?;
+    crate::agent_timeline::migrate_agent_chat_v11(connection)?;
     connection.pragma_update(None, "user_version", CONTROL_SCHEMA_VERSION)?;
     Ok(())
 }
@@ -1102,7 +1167,7 @@ fn migrate_worktree_review_state_v10(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
+pub(crate) fn table_exists(connection: &Connection, table: &str) -> Result<bool> {
     let count: i64 = connection.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
         [table],
@@ -1131,6 +1196,17 @@ fn execute_read(connection: &Connection, command: ControlCommand) -> Result<Cont
         ControlCommand::BriefGet { session_id } => {
             Ok(ControlResponse::Brief(read_brief(connection, &session_id)?))
         }
+        ControlCommand::AgentChatList { session_id } => Ok(ControlResponse::AgentChats(
+            crate::agent_timeline::list_chats(connection, &session_id)?,
+        )),
+        ControlCommand::AgentTimelineFetch {
+            chat_id,
+            after_seq,
+            limit,
+            ..
+        } => Ok(ControlResponse::AgentTimeline(
+            crate::agent_timeline::fetch_entries(connection, &chat_id, after_seq, limit)?,
+        )),
         _ => bail!("mutation command cannot execute through read path"),
     }
 }
@@ -1280,7 +1356,54 @@ fn execute_mutation(
             bump_revision(transaction, &session_id)?;
             Ok(ControlResponse::Brief(Some(brief)))
         }
-        ControlCommand::BoardRead { .. } | ControlCommand::BriefGet { .. } => {
+        ControlCommand::AgentChatEnsure {
+            session_id,
+            provider,
+            cwd,
+            new_chat_id,
+            initial_acp_session_id,
+        } => Ok(ControlResponse::AgentChat(
+            crate::agent_timeline::ensure_chat(
+                transaction,
+                &session_id,
+                &provider,
+                &cwd,
+                &new_chat_id,
+                initial_acp_session_id.as_deref(),
+                now_millis(),
+            )?,
+        )),
+        ControlCommand::AgentChatSetAcpSession {
+            chat_id,
+            acp_session_id,
+            ..
+        } => {
+            crate::agent_timeline::set_chat_acp_session(
+                transaction,
+                &chat_id,
+                &acp_session_id,
+                now_millis(),
+            )?;
+            Ok(ControlResponse::Ack)
+        }
+        ControlCommand::AgentChatDelete { chat_id, .. } => {
+            crate::agent_timeline::delete_chat(transaction, &chat_id)?;
+            Ok(ControlResponse::Ack)
+        }
+        ControlCommand::AgentTimelineAppend {
+            chat_id, entries, ..
+        } => Ok(ControlResponse::TimelineAppended {
+            last_seq: crate::agent_timeline::append_entries(
+                transaction,
+                &chat_id,
+                &entries,
+                now_millis(),
+            )?,
+        }),
+        ControlCommand::BoardRead { .. }
+        | ControlCommand::BriefGet { .. }
+        | ControlCommand::AgentChatList { .. }
+        | ControlCommand::AgentTimelineFetch { .. } => {
             bail!("read command cannot execute through mutation path")
         }
     }

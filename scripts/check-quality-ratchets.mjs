@@ -28,9 +28,12 @@ const sourceBudgets = {
   'src-tauri/src/browser/provider.rs': 2_834,
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
-  'src-tauri/src/app/acp.rs': 2_248,
+  // 2026-08-20: +chat-id keying, provider table, durable timeline recorder.
+  'src-tauri/src/app/acp.rs': 2727,
   'src-tauri/src/app/hermes.rs': 439,
-  'src-tauri/src/control_plane.rs': 2_471,
+  // 2026-08-20: +agent-chat/timeline command variants and dispatch arms; the SQL
+  // itself lives in agent_timeline.rs to keep this file from regrowing.
+  'src-tauri/src/control_plane.rs': 2_594,
   // Over-cap baseline: split or justify before raising.
   'src/components/SettingsDialog.tsx': 1_483,
   'src/styles/appChrome.css': 1_834,

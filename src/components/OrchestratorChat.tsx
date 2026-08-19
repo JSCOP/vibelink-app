@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 import { type ButtonHTMLAttributes, type ComponentType, useEffect, useState } from 'react'
 import { Archive, FileText, KeyRound, MessageSquare, Play, Plus, RefreshCw, RotateCcw, Settings2, Sparkles, Square, Wrench, type LucideProps } from 'lucide-react'
-import { dispatchHermesPrompt, getHermesRuntimeStatus, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
+import { dispatchHermesPrompt, getHermesRuntimeStatus, loadAgentChatHistory, setHermesModel, startHermesAgent, startHermesOutputStream } from '../ipc/hermes'
 import type { HermesRuntimeStatus, HermesWorkspaceState, SkillApplyInput, SkillEntry } from '../ipc/types'
 import type { HermesTurn } from '../state/hermes'
 import { useWorkspaceStore } from '../state/store'
@@ -38,6 +38,8 @@ export function OrchestratorChat() {
   const [activeSince, setActiveSince] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
   const [agentSection, setAgentSection] = useState<AgentSection>('chat')
+  const [provider, setProvider] = useState<'hermes' | 'claude-code'>('hermes')
+  const isClaude = provider === 'claude-code'
 
   const workspaceFolderLabel = controller.workspaceFolder || workspace?.workspaceFolder || 'VibeLink agent workspace'
   const statusLabel = status === 'busy' ? 'waiting for response' : status
@@ -75,6 +77,17 @@ export function OrchestratorChat() {
     return () => { cancelled = true }
   }, [controller.workspaceFolder, settings.hermesCommand, sessionId])
 
+
+  useEffect(() => {
+    if (!sessionId) return
+    let cancelled = false
+    void loadAgentChatHistory(sessionId)
+      .then((chat) => {
+        if (!cancelled && chat && (chat.provider === 'hermes' || chat.provider === 'claude-code')) setProvider(chat.provider)
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [sessionId])
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -126,7 +139,8 @@ export function OrchestratorChat() {
     try {
       await startHermesAgent({
         sessionId,
-        commandOverride: controller.commandOverride,
+        provider,
+        commandOverride: isClaude ? null : controller.commandOverride,
         workspaceFolder: controller.workspaceFolder,
       })
     } catch (startError) {
@@ -195,20 +209,39 @@ export function OrchestratorChat() {
     if (status !== 'busy') return
     await startHermesOutputStream({ force: true })
     const generation = useWorkspaceStore.getState().hermesGenerations[sessionId]
-    if (generation === undefined) return
-    await invoke('agent_chat_cancel', { sessionId, generation })
+    const chatId = useWorkspaceStore.getState().hermesChatIds[sessionId]
+    if (generation === undefined || !chatId) return
+    await invoke('agent_chat_cancel', { chatId, generation })
   }
 
   const restart = async () => {
-    await invoke('agent_chat_stop', { sessionId }).catch(() => undefined)
-    await startHermesAgent({ sessionId, commandOverride: controller.commandOverride, workspaceFolder: controller.workspaceFolder })
+    const chatId = useWorkspaceStore.getState().hermesChatIds[sessionId]
+    if (chatId) await invoke('agent_chat_stop', { chatId }).catch(() => undefined)
+    await startHermesAgent({ sessionId, provider, commandOverride: isClaude ? null : controller.commandOverride, workspaceFolder: controller.workspaceFolder })
+  }
+
+  const switchProvider = async (next: 'hermes' | 'claude-code') => {
+    if (next === provider) return
+    setProvider(next)
+    const chatId = useWorkspaceStore.getState().hermesChatIds[sessionId]
+    if (chatId) await invoke('agent_chat_stop', { chatId }).catch(() => undefined)
+    const store = useWorkspaceStore.getState()
+    store.resetHermesTranscript(sessionId)
+    store.setHermesStatus(sessionId, 'idle')
+    try {
+      await startHermesAgent({ sessionId, provider: next, commandOverride: next === 'hermes' ? controller.commandOverride : null, workspaceFolder: controller.workspaceFolder })
+      await loadAgentChatHistory(sessionId)
+    } catch (switchError) {
+      setHermesStatus(sessionId, 'error')
+      useWorkspaceStore.getState().setError(String(switchError))
+    }
   }
 
   const setModel = async (modelId: string) => {
     if (modelId) await setHermesModel(sessionId, modelId)
   }
 
-  if (!runtime?.detected) {
+  if (!isClaude && !runtime?.detected) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
         <HermesInstallGuidance
@@ -222,7 +255,7 @@ export function OrchestratorChat() {
     )
   }
 
-  if (!workspace?.model) {
+  if (!isClaude && !workspace?.model) {
     return (
       <div className="orchestrator-chat hermes-chat hermes-empty-state">
         <h3>Configure VibeLink Agent</h3>
@@ -231,8 +264,8 @@ export function OrchestratorChat() {
         <div className="hermes-runtime-note">
           <small>Hermes CLI: {hermesCli || 'resolving…'}</small>
           <small>Workspace folder: {workspaceFolderLabel}</small>
-          <small>Global HERMES_HOME: {workspace?.home || runtime.home || 'resolving…'}</small>
-          <small>ACP: {runtime.command ?? 'hermes-acp'}</small>
+          <small>Global HERMES_HOME: {workspace?.home || runtime?.home || 'resolving…'}</small>
+          <small>ACP: {runtime?.command ?? 'hermes-acp'}</small>
         </div>
         <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />
         <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />
@@ -246,21 +279,25 @@ export function OrchestratorChat() {
       <section className="vibelink-agent-main">
         <header className="hermes-chat-header vibelink-agent-header">
           <div className="vibelink-agent-title-text">
-            <h3>VibeLink Agent</h3>
-            <p>{workspace.model.provider || 'default'} / {workspace.model.model} · {statusLabel}</p>
+            <h3>{isClaude ? 'Claude Code' : 'VibeLink Agent'}</h3>
+            <p>{isClaude ? 'claude-code-acp' : `${workspace?.model?.provider || 'default'} / ${workspace?.model?.model ?? ''}`} · {statusLabel}</p>
           </div>
           {status === 'error' ? <p className="hermes-form-message" title={error || undefined}>Agent failed. Check the transcript/top banner, then re-auth or restart.</p> : null}
           <div className="hermes-chat-controls">
+            <select value={provider} onChange={(event) => void switchProvider(event.target.value as 'hermes' | 'claude-code')} title="Agent provider" aria-label="Agent provider">
+              <option value="hermes">Hermes</option>
+              <option value="claude-code">Claude Code</option>
+            </select>
             <HeaderButton icon={FileText} label="Digest" title="Ask VibeLink Agent for a workspace progress digest" disabled={status === 'busy' || status === 'starting'} onClick={() => void sendWorkspaceDigest()} />
-            <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />
-            <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />
+            {isClaude ? null : <HeaderButton icon={KeyRound} label="Auth" title="Open Hermes auth CLI" onClick={() => void openHermesTerminal('auth')} />}
+            {isClaude ? null : <HeaderButton icon={Settings2} label="Model" title="Configure model and login" onClick={() => void openHermesTerminal('model')} />}
             <HeaderButton icon={RefreshCw} label="Refresh" title="Refresh agent global state" onClick={() => void refreshWorkspace()} />
             <HeaderButton icon={Plus} label="New" title="Start a new VibeLink Agent session" disabled={controller.actionsDisabled} onClick={() => void createHermesSession()} />
             {models?.available.length ? (
               <select value={models.current} onChange={(event) => void setModel(event.target.value)} title="Agent models">
                 {models.available.map((model) => <option key={model.id} value={model.id}>{model.name || model.id}</option>)}
               </select>
-            ) : <span className="hermes-model-pill" title="Hermes did not return a selectable model list; using its configured model.">{workspace.model.model}</span>}
+            ) : isClaude ? null : <span className="hermes-model-pill" title="Hermes did not return a selectable model list; using its configured model.">{workspace?.model?.model}</span>}
             {status === 'busy'
               ? <HeaderButton icon={Square} label="Cancel" title="Cancel active agent response" onClick={() => void cancel()} />
               : status === 'running'
@@ -316,7 +353,7 @@ export function OrchestratorChat() {
                 placeholder="Message VibeLink Agent..."
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={(event) => {
-                  if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+                  if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing || event.keyCode === 229) return
                   event.preventDefault()
                   if (message.trim()) void send()
                 }}
@@ -326,7 +363,7 @@ export function OrchestratorChat() {
           </>
         ) : null}
         {agentSection === 'skills' ? <AgentSkillsPanel sessionId={sessionId} /> : null}
-        {agentSection === 'messaging' ? <AgentMessagingPanel sessionId={sessionId} cliCommand={hermesCli} detected={runtime.detected} /> : null}
+        {agentSection === 'messaging' ? <AgentMessagingPanel sessionId={sessionId} cliCommand={hermesCli} detected={runtime?.detected ?? false} /> : null}
         {agentSection === 'artifacts' ? <AgentArtifactsPanel transcript={transcript} permissions={permissions.length} /> : null}
       </section>
     </div>

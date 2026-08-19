@@ -292,6 +292,8 @@ pub fn run() {
             acp::agent_chat_resume_session,
             acp::agent_chat_list_sessions,
             acp::init_agent_chat_output,
+            acp::agent_chat_list,
+            acp::agent_chat_timeline,
             hermes::hermes_auth_list,
             hermes::hermes_cli_command,
             mcp_check::mcp_self_check,

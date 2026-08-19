@@ -155,6 +155,8 @@ type WorkspaceState = {
   hermesModels: Record<string, HermesModelsState>
   hermesPendingPrompts: Record<string, HermesPendingPrompt[]>
   hermesGenerations: Record<string, number>
+  /** Durable chat id per workspace for the active provider chat. */
+  hermesChatIds: Record<string, string>
   hermesCurrentSession: Record<string, string>
   hermesSessions: Record<string, HermesSessionInfo[]>
   selectedTaskId: Record<string, string | null>
@@ -257,6 +259,8 @@ type WorkspaceState = {
   setHermesModels: (sessionId: string, models: { available: HermesModelInfo[]; current: string }) => void
   setHermesStatus: (sessionId: string, status: HermesStatus) => void
   setHermesGeneration: (sessionId: string, generation: number) => void
+  setHermesChatId: (sessionId: string, chatId: string) => void
+  hydrateHermesTranscript: (sessionId: string, turns: HermesTurn[]) => void
   enqueueHermesPrompt: (sessionId: string, text: string) => void
   claimHermesPrompt: (sessionId: string) => HermesPendingPrompt | undefined
   ackHermesPrompt: (sessionId: string, promptId: string) => void
@@ -297,6 +301,7 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   hermesPermissions: {},
   hermesUsage: {},
   hermesGenerations: {},
+  hermesChatIds: {},
   hermesModels: {},
   hermesPendingPrompts: {},
   hermesCurrentSession: {},
@@ -1242,11 +1247,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       const session = get().sessions.find((item) => item.id === sessionId)
       get().setHermesStatus(sessionId, 'starting')
       try {
-        const started = await invoke<{ generation: number }>('agent_chat_start', {
+        const started = await invoke<{ generation: number; chatId: string }>('agent_chat_start', {
           sessionId,
+          provider: 'hermes',
           commandOverride: get().settings.hermesCommand || null,
           workspaceFolder: session?.workspaceFolder ?? null,
         })
+        get().setHermesChatId(sessionId, started.chatId)
         get().setHermesGeneration(sessionId, started.generation)
       } catch (startError) {
         get().setHermesStatus(sessionId, 'error')
@@ -1324,6 +1331,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
   setHermesStatus: (sessionId: string, status: HermesStatus) => {
     set((state) => ({ hermesStatus: { ...state.hermesStatus, [sessionId]: status } }))
+  },
+  hydrateHermesTranscript: (sessionId: string, turns: HermesTurn[]) => {
+    set((state) => {
+      // Live streaming already produced content; the durable page is only the
+      // cold-start paint and must never clobber a hotter transcript.
+      if ((state.hermesTranscript[sessionId]?.length ?? 0) > 0) return state
+      return { hermesTranscript: { ...state.hermesTranscript, [sessionId]: turns } }
+    })
+  },
+  setHermesChatId: (sessionId: string, chatId: string) => {
+    set((state) => state.hermesChatIds[sessionId] === chatId ? state : ({
+      hermesChatIds: { ...state.hermesChatIds, [sessionId]: chatId },
+    }))
   },
   setHermesGeneration: (sessionId: string, generation: number) => {
     set((state) => ({

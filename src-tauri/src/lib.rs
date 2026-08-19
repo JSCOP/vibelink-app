@@ -1,4 +1,5 @@
 pub mod agent_runtime;
+pub mod agent_timeline;
 pub mod app;
 pub use daemon::automation;
 pub mod browser;

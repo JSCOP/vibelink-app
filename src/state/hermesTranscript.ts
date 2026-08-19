@@ -1,5 +1,16 @@
 import type { HermesPlanEntry, HermesTextPartKind, HermesToolCallView, HermesTranscriptPart, HermesTurn } from './hermes'
 
+/** One durable timeline row from the control-plane database. */
+export type AgentTimelineRow = {
+  seq: number
+  role: 'user' | 'assistant' | 'system'
+  kind: 'message' | 'thought' | 'toolCall' | 'plan' | 'permission' | 'error'
+  entityId?: string | null
+  body: string
+  truncated: boolean
+  createdAt: number
+}
+
 const MAX_HERMES_TURNS = 400
 
 export function capHermesTurns(turns: HermesTurn[]): HermesTurn[] {
@@ -56,4 +67,67 @@ export function transcriptPartsForUpdate(turn: HermesTurn): HermesTranscriptPart
   if (turn.plan?.length) parts.push({ kind: 'plan', entries: turn.plan })
   for (const call of turn.toolCalls) parts.push({ kind: 'toolCall', toolCallId: call.id })
   return parts
+}
+
+/** Folds persisted timeline rows into renderable turns. Tool-call rows sharing
+ * an entityId collapse patch-style, last row wins per field. Permission rows
+ * are historical records and are not rendered as chat content. */
+export function turnsFromTimeline(rows: AgentTimelineRow[]): HermesTurn[] {
+  const turns: HermesTurn[] = []
+  const withAssistant = (update: (turn: HermesTurn) => HermesTurn) => {
+    const last = turns[turns.length - 1]
+    if (!last || last.role !== 'assistant') turns.push(update(createAssistantTurn()))
+    else turns[turns.length - 1] = update(last)
+  }
+  for (const row of rows) {
+    if (row.kind === 'permission') continue
+    if (row.role === 'user') {
+      turns.push({ role: 'user', text: row.body, thoughts: '', toolCalls: [], parts: [{ kind: 'message', text: row.body }] })
+      continue
+    }
+    if (row.kind === 'message' || row.kind === 'error') {
+      const text = row.kind === 'error' ? `Agent error: ${row.body}` : row.body
+      withAssistant((turn) => appendHermesTextPart(turn, 'message', text))
+    } else if (row.kind === 'thought') {
+      withAssistant((turn) => appendHermesTextPart(turn, 'thought', row.body))
+    } else if (row.kind === 'plan') {
+      const entries = parseJson<HermesPlanEntry[]>(row.body) ?? []
+      withAssistant((turn) => updateHermesPlanPart(turn, entries))
+    } else if (row.kind === 'toolCall' && row.entityId) {
+      const patch = parseJson<{ title?: string; toolKind?: string; status?: string; content?: string }>(row.body) ?? {}
+      withAssistant((turn) => {
+        const existing = turn.toolCalls.find((call) => call.id === row.entityId)
+        if (!existing) {
+          return appendHermesToolCallPart(turn, {
+            id: row.entityId ?? '',
+            title: patch.title ?? '',
+            toolKind: patch.toolKind ?? '',
+            status: patch.status ?? '',
+            content: patch.content,
+          })
+        }
+        return {
+          ...turn,
+          toolCalls: turn.toolCalls.map((call) => call.id === row.entityId
+            ? {
+                ...call,
+                status: patch.status ?? call.status,
+                content: patch.content !== undefined ? call.content + patch.content : call.content,
+                title: patch.title ?? call.title,
+                toolKind: patch.toolKind ?? call.toolKind,
+              }
+            : call),
+        }
+      })
+    }
+  }
+  return capHermesTurns(turns)
+}
+
+function parseJson<T>(text: string): T | undefined {
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return undefined
+  }
 }

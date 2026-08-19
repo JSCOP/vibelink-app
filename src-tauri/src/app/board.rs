@@ -252,7 +252,7 @@ fn task_response(response: ControlResponse) -> Result<Task> {
     }
 }
 
-fn request_control(command: ControlCommand) -> Result<ControlResponse> {
+pub(crate) fn request_control(command: ControlCommand) -> Result<ControlResponse> {
     let stream = spawn_daemon::connect_daemon().or_else(|_| spawn_daemon::ensure_daemon())?;
     let (mut reader, mut writer) = stream.split();
     let req = 1;

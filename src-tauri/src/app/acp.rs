@@ -26,6 +26,8 @@ use super::hermes::{
     acp_model_id_from_configured_model, read_global_configured_model, resolve_command,
     HermesConfiguredModel,
 };
+use crate::agent_timeline::{AgentChatInfo, AgentTimelineEntry, AgentTimelinePage};
+use crate::control_plane::{ControlCommand, ControlResponse};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -34,6 +36,72 @@ use std::os::windows::process::CommandExt;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A provider is a value, not a trait: everything after spawn is plain ACP.
+pub struct AcpProvider {
+    pub id: &'static str,
+    resolve: fn(Option<String>) -> Result<(String, Vec<String>)>,
+    /// Hermes takes its model from HERMES_HOME config; Claude Code owns its own.
+    push_configured_model: bool,
+}
+
+pub const PROVIDERS: &[AcpProvider] = &[
+    AcpProvider {
+        id: "hermes",
+        resolve: resolve_hermes_acp,
+        push_configured_model: true,
+    },
+    AcpProvider {
+        id: "claude-code",
+        resolve: resolve_claude_code_acp,
+        push_configured_model: false,
+    },
+];
+
+pub fn provider(id: &str) -> Result<&'static AcpProvider> {
+    PROVIDERS
+        .iter()
+        .find(|provider| provider.id == id)
+        .ok_or_else(|| anyhow!("unknown agent provider {id}"))
+}
+
+fn resolve_hermes_acp(command_override: Option<String>) -> Result<(String, Vec<String>)> {
+    Ok((resolve_command(command_override)?, Vec::new()))
+}
+
+fn resolve_claude_code_acp(command_override: Option<String>) -> Result<(String, Vec<String>)> {
+    if let Some(command) = command_override.filter(|value| !value.trim().is_empty()) {
+        let resolved = crate::daemon::pty::resolve_program(command.trim())
+            .ok_or_else(|| anyhow!("Claude Code ACP override not found: {command}"))?;
+        return Ok((resolved, Vec::new()));
+    }
+    if let Some(command) = crate::daemon::pty::resolve_program("claude-code-acp") {
+        return Ok((command, Vec::new()));
+    }
+    // Fall back to npx so the adapter works without a global install.
+    let npx = crate::daemon::pty::resolve_program("npx")
+        .ok_or_else(|| anyhow!("Claude Code ACP requires `claude-code-acp` or `npx` on PATH"))?;
+    Ok((
+        npx,
+        vec![
+            "-y".to_string(),
+            "@zed-industries/claude-code-acp".to_string(),
+        ],
+    ))
+}
+
+const TIMELINE_FLUSH_BYTES: usize = 8 * 1024;
+const TIMELINE_FLUSH_AGE: Duration = Duration::from_millis(250);
+
+/// One pending coalesced chunk run (message/thought) per chat. Tool calls,
+/// plans, permissions, and errors flush it and land as their own rows.
+struct TimelinePending {
+    session_id: String,
+    role: &'static str,
+    kind: &'static str,
+    buf: String,
+    since: Instant,
+}
 /// How long a cooperative `session/cancel` gets to land before the prompt wait is
 /// resolved locally. A wedged agent must never leave the chat stuck in `busy`.
 const PROMPT_CANCEL_GRACE: Duration = Duration::from_secs(5);
@@ -88,6 +156,7 @@ pub struct AgentPlanEntry {
 #[serde(rename_all = "camelCase")]
 pub struct AgentEvent {
     generation: u64,
+    chat_id: String,
     #[serde(flatten)]
     payload: AgentEventPayload,
 }
@@ -172,20 +241,26 @@ pub enum AgentEventPayload {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStartResult {
-    generation: u64,
+    pub generation: u64,
+    pub chat_id: String,
 }
 
 struct AcpInstanceEntry {
     generation: u64,
+    /// Workspace id the chat belongs to; events and MCP scoping use it.
+    session_id: String,
+    provider: &'static AcpProvider,
     instance: Arc<AcpInstance>,
 }
 
 pub struct AcpManager {
+    /// Keyed by chat id. A workspace may hold one chat per provider.
     instances: Mutex<HashMap<String, AcpInstanceEntry>>,
     starting: Mutex<HashMap<String, u64>>,
     next_generation: AtomicU64,
     output_channel: Mutex<Option<Channel<AgentEvent>>>,
     active_prompts: Mutex<HashMap<String, u64>>,
+    timeline: Mutex<HashMap<String, TimelinePending>>,
 }
 
 struct AcpInstance {
@@ -213,6 +288,7 @@ impl AcpManager {
             next_generation: AtomicU64::new(1),
             output_channel: Mutex::new(None),
             active_prompts: Mutex::new(HashMap::new()),
+            timeline: Mutex::new(HashMap::new()),
         }
     }
 
@@ -226,61 +302,77 @@ impl AcpManager {
     pub fn start(
         self: &Arc<Self>,
         session_id: String,
+        provider_id: String,
         command_override: Option<String>,
         workspace_folder: Option<String>,
-    ) -> Result<u64> {
+    ) -> Result<AgentStartResult> {
+        let provider = provider(&provider_id)?;
+        let chat = self.ensure_chat(&session_id, provider, workspace_folder.as_deref())?;
+        let chat_id = chat.chat_id.clone();
+
         let existing = self
             .instances
             .lock()
-            .expect("hermes instances poisoned")
-            .get(&session_id)
+            .expect("acp instances poisoned")
+            .get(&chat_id)
             .map(|entry| (entry.generation, Arc::clone(&entry.instance)));
         if let Some((generation, instance)) = &existing {
             if let Some(acp_session_id) = instance
                 .acp_session_id
                 .lock()
-                .expect("hermes acp session poisoned")
+                .expect("acp session poisoned")
                 .clone()
             {
                 self.send_current_event(
-                    &session_id,
+                    &chat_id,
                     *generation,
                     AgentEventPayload::Started {
                         session_id: session_id.clone(),
                         acp_session_id,
                     },
                 )?;
-                return Ok(*generation);
+                return Ok(AgentStartResult {
+                    generation: *generation,
+                    chat_id,
+                });
             }
         }
 
         let generation = {
-            let mut starting = self.starting.lock().expect("hermes starting poisoned");
-            if let Some(generation) = starting.get(&session_id) {
-                return Ok(*generation);
+            let mut starting = self.starting.lock().expect("acp starting poisoned");
+            if let Some(generation) = starting.get(&chat_id) {
+                return Ok(AgentStartResult {
+                    generation: *generation,
+                    chat_id,
+                });
             }
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
-            starting.insert(session_id.clone(), generation);
+            starting.insert(chat_id.clone(), generation);
             generation
         };
 
         if let Some((existing_generation, _)) = existing {
-            if let Err(error) = self.stop_generation(&session_id, existing_generation, false) {
-                if self.current_generation(&session_id) == Some(existing_generation) {
-                    self.clear_starting(&session_id, generation);
+            if let Err(error) = self.stop_generation(&chat_id, existing_generation, false) {
+                if self.current_generation(&chat_id) == Some(existing_generation) {
+                    self.clear_starting(&chat_id, generation);
                     return Err(error);
                 }
             }
         }
 
         let result = (|| -> Result<()> {
-            let command_path = resolve_command(command_override)?;
-            let agent_dir = agent_workspace_dir(&session_id)?;
+            let (command_path, command_args) = (provider.resolve)(command_override)?;
+            let agent_dir = agent_workspace_dir(&chat_id)?;
             std::fs::create_dir_all(&agent_dir)?;
             let cwd = resolve_workspace_cwd(workspace_folder.as_deref(), &agent_dir)?;
             let acp_cwd = cwd.to_string_lossy().to_string();
-            let configured_model = read_global_configured_model().ok().flatten();
+            let configured_model = if provider.push_configured_model {
+                read_global_configured_model().ok().flatten()
+            } else {
+                None
+            };
             let mut command = Command::new(&command_path);
+            command.args(&command_args);
             command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -290,18 +382,19 @@ impl AcpManager {
 
             let mut child = command.spawn().with_context(|| {
                 format!(
-                    "spawn Hermes ACP command {command_path} in {}",
+                    "spawn {} ACP command {command_path} in {}",
+                    provider.id,
                     cwd.display()
                 )
             })?;
             let stdin = child
                 .stdin
                 .take()
-                .ok_or_else(|| anyhow!("Hermes stdin unavailable"))?;
+                .ok_or_else(|| anyhow!("agent stdin unavailable"))?;
             let stdout = child
                 .stdout
                 .take()
-                .ok_or_else(|| anyhow!("Hermes stdout unavailable"))?;
+                .ok_or_else(|| anyhow!("agent stdout unavailable"))?;
             let stderr = child.stderr.take();
             let instance = Arc::new(AcpInstance {
                 child: Mutex::new(child),
@@ -316,16 +409,19 @@ impl AcpManager {
 
             self.instances
                 .lock()
-                .expect("hermes instances poisoned")
+                .expect("acp instances poisoned")
                 .insert(
-                    session_id.clone(),
+                    chat_id.clone(),
                     AcpInstanceEntry {
                         generation,
+                        session_id: session_id.clone(),
+                        provider,
                         instance: Arc::clone(&instance),
                     },
                 );
 
             spawn_stdout_reader(
+                chat_id.clone(),
                 session_id.clone(),
                 generation,
                 stdout,
@@ -333,41 +429,40 @@ impl AcpManager {
                 Arc::clone(self),
             );
             if let Some(stderr) = stderr {
-                spawn_stderr_drain(session_id.clone(), generation, stderr, Arc::clone(self));
+                spawn_stderr_drain(chat_id.clone(), generation, stderr, Arc::clone(self));
             }
 
+            let handshake_chat_id = chat_id.clone();
             let handshake_session_id = session_id.clone();
             let handshake_cwd = acp_cwd.clone();
-            let handshake_home = agent_dir.clone();
+            let handshake_resume = chat.acp_session_id.clone();
             let handshake_instance = Arc::clone(&instance);
             let handshake_manager = Arc::clone(self);
             thread::Builder::new()
-                .name(format!("vibelink-hermes-handshake-{session_id}"))
+                .name(format!("vibelink-acp-handshake-{chat_id}"))
                 .spawn(move || {
                     let result = handshake(
+                        &handshake_chat_id,
                         &handshake_session_id,
                         generation,
                         &handshake_cwd,
-                        &handshake_home,
+                        handshake_resume.as_deref(),
                         configured_model.as_ref(),
                         &handshake_instance,
                         &handshake_manager,
                     );
-                    handshake_manager.clear_starting(&handshake_session_id, generation);
+                    handshake_manager.clear_starting(&handshake_chat_id, generation);
                     if let Err(err) = result {
                         let _ = handshake_manager.send_current_event(
-                            &handshake_session_id,
+                            &handshake_chat_id,
                             generation,
                             AgentEventPayload::Error {
                                 session_id: handshake_session_id.clone(),
                                 message: err.to_string(),
                             },
                         );
-                        let _ = handshake_manager.stop_generation(
-                            &handshake_session_id,
-                            generation,
-                            true,
-                        );
+                        let _ =
+                            handshake_manager.stop_generation(&handshake_chat_id, generation, true);
                     }
                 })
                 .map_err(|err| anyhow!(err))?;
@@ -375,22 +470,79 @@ impl AcpManager {
         })();
 
         if result.is_err() {
-            self.clear_starting(&session_id, generation);
-            let _ = self.stop_generation(&session_id, generation, false);
+            self.clear_starting(&chat_id, generation);
+            let _ = self.stop_generation(&chat_id, generation, false);
         }
-        result.map(|()| generation)
+        result.map(|()| AgentStartResult {
+            generation,
+            chat_id,
+        })
     }
 
-    pub fn new_session(self: &Arc<Self>, session_id: &str, generation: u64) -> Result<String> {
-        let instance = self.instance(session_id, generation)?;
-        let home = agent_workspace_dir(session_id)?;
-        let configured_model = read_global_configured_model().ok().flatten();
-        let response = new_acp_session(session_id, &instance, &instance.cwd)?;
+    /// Resolves the durable chat row for `(workspace, provider)`, creating it on
+    /// first use. The first Hermes chat reuses the legacy per-workspace state
+    /// directory (and its saved ACP session) as its identity, so nothing is lost
+    /// by the move to chat-keyed state.
+    fn ensure_chat(
+        &self,
+        session_id: &str,
+        provider: &'static AcpProvider,
+        workspace_folder: Option<&str>,
+    ) -> Result<AgentChatInfo> {
+        let new_chat_id = if provider.id == "hermes" {
+            sanitize_session_id(session_id)
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        let initial_acp_session_id = if provider.id == "hermes" {
+            agent_workspace_dir(&new_chat_id)
+                .ok()
+                .and_then(|dir| load_last_acp_session(&dir.join("last-acp-session")).ok())
+                .flatten()
+        } else {
+            None
+        };
+        let provisional_dir = agent_workspace_dir(&new_chat_id)?;
+        let cwd_hint = resolve_workspace_cwd(workspace_folder, &provisional_dir)
+            .unwrap_or(provisional_dir)
+            .to_string_lossy()
+            .to_string();
+        match super::board::request_control(ControlCommand::AgentChatEnsure {
+            session_id: session_id.to_string(),
+            provider: provider.id.to_string(),
+            cwd: cwd_hint,
+            new_chat_id,
+            initial_acp_session_id,
+        })? {
+            ControlResponse::AgentChat(chat) => Ok(chat),
+            other => bail!("unexpected control response for chat ensure: {other:?}"),
+        }
+    }
+
+    fn entry_meta(&self, chat_id: &str) -> Option<(String, &'static AcpProvider)> {
+        self.instances
+            .lock()
+            .expect("acp instances poisoned")
+            .get(chat_id)
+            .map(|entry| (entry.session_id.clone(), entry.provider))
+    }
+
+    pub fn new_session(self: &Arc<Self>, chat_id: &str, generation: u64) -> Result<String> {
+        let instance = self.instance(chat_id, generation)?;
+        let (session_id, provider) = self
+            .entry_meta(chat_id)
+            .ok_or_else(|| anyhow!("HERMES_SESSION_REPLACED"))?;
+        let configured_model = if provider.push_configured_model {
+            read_global_configured_model().ok().flatten()
+        } else {
+            None
+        };
+        let response = new_acp_session(&session_id, &instance, &instance.cwd)?;
         let acp_id = acp_session_id_from_response(&response, None)?;
         finalize_acp_session(
-            session_id,
+            chat_id,
+            &session_id,
             generation,
-            &home,
             configured_model.as_ref(),
             &instance,
             self,
@@ -402,18 +554,24 @@ impl AcpManager {
 
     pub fn resume_session(
         self: &Arc<Self>,
-        session_id: &str,
+        chat_id: &str,
         generation: u64,
         acp_session_id: String,
     ) -> Result<()> {
-        let instance = self.instance(session_id, generation)?;
-        let home = agent_workspace_dir(session_id)?;
-        let configured_model = read_global_configured_model().ok().flatten();
+        let instance = self.instance(chat_id, generation)?;
+        let (session_id, provider) = self
+            .entry_meta(chat_id)
+            .ok_or_else(|| anyhow!("HERMES_SESSION_REPLACED"))?;
+        let configured_model = if provider.push_configured_model {
+            read_global_configured_model().ok().flatten()
+        } else {
+            None
+        };
         self.send_current_event(
-            session_id,
+            chat_id,
             generation,
             AgentEventPayload::SessionReplay {
-                session_id: session_id.to_string(),
+                session_id: session_id.clone(),
                 acp_session_id: acp_session_id.clone(),
             },
         )?;
@@ -422,14 +580,14 @@ impl AcpManager {
             json!({
                 "cwd": &instance.cwd,
                 "sessionId": acp_session_id,
-                "mcpServers": vibelink_mcp_servers(session_id, crate::daemon::paths::app_flavor()),
+                "mcpServers": vibelink_mcp_servers(&session_id, crate::daemon::paths::app_flavor()),
             }),
             Some(REQUEST_TIMEOUT),
         )?;
         finalize_acp_session(
-            session_id,
+            chat_id,
+            &session_id,
             generation,
-            &home,
             configured_model.as_ref(),
             &instance,
             self,
@@ -438,12 +596,8 @@ impl AcpManager {
         )
     }
 
-    pub fn list_sessions(
-        &self,
-        session_id: &str,
-        generation: u64,
-    ) -> Result<Vec<AgentSessionInfo>> {
-        let instance = self.instance(session_id, generation)?;
+    pub fn list_sessions(&self, chat_id: &str, generation: u64) -> Result<Vec<AgentSessionInfo>> {
+        let instance = self.instance(chat_id, generation)?;
         if !instance.sessions_list_supported.load(Ordering::Relaxed) {
             bail!("session list requires a newer Hermes — run `hermes update`");
         }
@@ -492,7 +646,7 @@ impl AcpManager {
                 break;
             }
         }
-        if !self.is_current(session_id, generation) {
+        if !self.is_current(chat_id, generation) {
             bail!("HERMES_SESSION_REPLACED");
         }
         Ok(sessions)
@@ -500,15 +654,26 @@ impl AcpManager {
 
     pub fn send_message(
         self: &Arc<Self>,
-        session_id: String,
+        chat_id: String,
         generation: u64,
         text: String,
     ) -> Result<()> {
-        let instance = self.instance(&session_id, generation)?;
+        let instance = self.instance(&chat_id, generation)?;
+        let (session_id, _) = self
+            .entry_meta(&chat_id)
+            .ok_or_else(|| anyhow!("HERMES_SESSION_REPLACED"))?;
         let acp_session_id = instance.acp_session_id()?;
         let skill_prompt =
             crate::app::skills::augment_prompt_with_enabled_skills(&session_id, &text)?;
         let prompt_text = Self::augment_prompt_with_workspace_brief(&session_id, skill_prompt)?;
+        // Record the user's message durably before it goes to the agent. The
+        // ACP user-message echo is deliberately NOT recorded (see
+        // record_payload) so providers that echo do not double-write.
+        self.append_rows(
+            &session_id,
+            &chat_id,
+            vec![timeline_row("user", "message", None, text.clone())],
+        );
         instance
             .prompt_cancel_requested
             .store(false, Ordering::SeqCst);
@@ -520,15 +685,16 @@ impl AcpManager {
             }),
         )?;
         let pending_id = pending.id;
-        self.set_prompt_active(&session_id, generation, true);
+        self.set_prompt_active(&chat_id, generation, true);
         let manager = Arc::clone(self);
         let response_instance = Arc::clone(&instance);
+        let response_chat_id = chat_id.clone();
         let response_session_id = session_id.clone();
         let spawn = thread::Builder::new()
-            .name(format!("vibelink-hermes-prompt-{session_id}"))
+            .name(format!("vibelink-acp-prompt-{chat_id}"))
             .spawn(move || {
                 let result = response_instance.finish_prompt_request(pending);
-                manager.set_prompt_active(&response_session_id, generation, false);
+                manager.set_prompt_active(&response_chat_id, generation, false);
                 match result {
                     Ok(value) => {
                         let stop_reason = value
@@ -537,7 +703,7 @@ impl AcpManager {
                             .unwrap_or("end_turn")
                             .to_string();
                         let _ = manager.send_current_event(
-                            &response_session_id,
+                            &response_chat_id,
                             generation,
                             AgentEventPayload::TurnEnded {
                                 session_id: response_session_id.clone(),
@@ -547,7 +713,7 @@ impl AcpManager {
                     }
                     Err(err) => {
                         let _ = manager.send_current_event(
-                            &response_session_id,
+                            &response_chat_id,
                             generation,
                             AgentEventPayload::Error {
                                 session_id: response_session_id.clone(),
@@ -559,7 +725,7 @@ impl AcpManager {
             });
         if let Err(error) = spawn {
             instance.cancel_pending(pending_id);
-            self.set_prompt_active(&session_id, generation, false);
+            self.set_prompt_active(&chat_id, generation, false);
             return Err(anyhow!(error));
         }
         Ok(())
@@ -592,15 +758,15 @@ impl AcpManager {
         prompt
     }
 
-    pub fn cancel(&self, session_id: &str, generation: u64) -> Result<()> {
-        if !self.is_prompt_active(session_id, generation) {
+    pub fn cancel(&self, chat_id: &str, generation: u64) -> Result<()> {
+        if !self.is_prompt_active(chat_id, generation) {
             debug!(
-                session_id,
-                generation, "ignoring Hermes cancel without active prompt"
+                chat_id,
+                generation, "ignoring agent cancel without active prompt"
             );
             return Ok(());
         }
-        let instance = self.instance(session_id, generation)?;
+        let instance = self.instance(chat_id, generation)?;
         // Arm the local fallback before asking Hermes to stop. A hung agent never
         // answers `session/cancel`, and without this the prompt thread waits forever
         // and the chat stays `busy` with no way out from the UI.
@@ -613,54 +779,69 @@ impl AcpManager {
 
     pub fn respond_permission(
         &self,
-        session_id: &str,
+        chat_id: &str,
         generation: u64,
         request_id: u64,
         option_id: String,
     ) -> Result<()> {
-        let instance = self.instance(session_id, generation)?;
+        let instance = self.instance(chat_id, generation)?;
         instance.write_line(&json!({
             "jsonrpc": "2.0",
             "id": request_id,
-            "result": { "optionId": option_id },
-        }))
+            "result": { "optionId": option_id.clone() },
+        }))?;
+        // Record the decision so a restarted app (or a phone) sees it.
+        if let Some((session_id, _)) = self.entry_meta(chat_id) {
+            self.append_rows(
+                &session_id,
+                chat_id,
+                vec![timeline_row(
+                    "system",
+                    "permission",
+                    Some(format!("perm-{request_id}")),
+                    json!({ "requestId": request_id, "status": "resolved", "optionId": option_id })
+                        .to_string(),
+                )],
+            );
+        }
+        Ok(())
     }
 
-    pub fn set_model(&self, session_id: &str, generation: u64, model_id: String) -> Result<()> {
+    pub fn set_model(&self, chat_id: &str, generation: u64, model_id: String) -> Result<()> {
         require_qualified_model(&model_id)?;
-        let instance = self.instance(session_id, generation)?;
+        let instance = self.instance(chat_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.request(
             "session/set_model",
             json!({ "sessionId": acp_session_id, "modelId": model_id }),
             Some(REQUEST_TIMEOUT),
         )?;
-        self.instance(session_id, generation)?;
+        self.instance(chat_id, generation)?;
         Ok(())
     }
 
-    pub fn set_mode(&self, session_id: &str, generation: u64, mode_id: String) -> Result<()> {
-        let instance = self.instance(session_id, generation)?;
+    pub fn set_mode(&self, chat_id: &str, generation: u64, mode_id: String) -> Result<()> {
+        let instance = self.instance(chat_id, generation)?;
         let acp_session_id = instance.acp_session_id()?;
         instance.request(
             "session/set_mode",
             json!({ "sessionId": acp_session_id, "modeId": mode_id }),
             Some(REQUEST_TIMEOUT),
         )?;
-        self.instance(session_id, generation)?;
+        self.instance(chat_id, generation)?;
         Ok(())
     }
-    pub fn stop(&self, session_id: &str) -> Result<()> {
-        let Some(generation) = self.current_generation(session_id) else {
+    pub fn stop(&self, chat_id: &str) -> Result<()> {
+        let Some(generation) = self.current_generation(chat_id) else {
             return Ok(());
         };
-        self.stop_generation(session_id, generation, true)
+        self.stop_generation(chat_id, generation, true)
     }
 
-    fn stop_generation(&self, session_id: &str, generation: u64, emit_exit: bool) -> Result<()> {
-        let instance = self.instance(session_id, generation)?;
+    fn stop_generation(&self, chat_id: &str, generation: u64, emit_exit: bool) -> Result<()> {
+        let instance = self.instance(chat_id, generation)?;
         instance.fail_pending("HERMES_SESSION_REPLACED");
-        self.set_prompt_active(session_id, generation, false);
+        self.set_prompt_active(chat_id, generation, false);
         {
             let mut child = instance.child.lock().expect("hermes child poisoned");
             if child.try_wait()?.is_none() {
@@ -674,140 +855,371 @@ impl AcpManager {
             }
         }
         if emit_exit {
-            self.retire_instance_if_current(session_id, generation, true)?;
+            self.retire_instance_if_current(chat_id, generation, true)?;
         } else {
-            self.remove_instance_if_current(session_id, generation);
+            self.remove_instance_if_current(chat_id, generation);
         }
         Ok(())
     }
 
     pub fn shutdown_all(&self) {
-        let session_ids: Vec<String> = self
+        let chat_ids: Vec<String> = self
             .instances
             .lock()
-            .expect("hermes instances poisoned")
+            .expect("acp instances poisoned")
             .keys()
             .cloned()
             .collect();
-        for session_id in session_ids {
-            let _ = self.stop(&session_id);
+        for chat_id in chat_ids {
+            let _ = self.stop(&chat_id);
         }
     }
 
-    fn clear_starting(&self, session_id: &str, generation: u64) {
-        let mut starting = self.starting.lock().expect("hermes starting poisoned");
-        if starting.get(session_id) == Some(&generation) {
-            starting.remove(session_id);
+    pub fn stop_session_chats(&self, session_id: &str) -> Vec<String> {
+        let chat_ids: Vec<String> = self
+            .instances
+            .lock()
+            .expect("acp instances poisoned")
+            .iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(chat_id, _)| chat_id.clone())
+            .collect();
+        for chat_id in &chat_ids {
+            let _ = self.stop(chat_id);
+        }
+        chat_ids
+    }
+
+    fn clear_starting(&self, chat_id: &str, generation: u64) {
+        let mut starting = self.starting.lock().expect("acp starting poisoned");
+        if starting.get(chat_id) == Some(&generation) {
+            starting.remove(chat_id);
         }
     }
 
-    fn set_prompt_active(&self, session_id: &str, generation: u64, active: bool) {
+    fn set_prompt_active(&self, chat_id: &str, generation: u64, active: bool) {
         let mut active_prompts = self
             .active_prompts
             .lock()
-            .expect("hermes active prompts poisoned");
+            .expect("acp active prompts poisoned");
         if active {
-            active_prompts.insert(session_id.to_string(), generation);
-        } else if active_prompts.get(session_id) == Some(&generation) {
-            active_prompts.remove(session_id);
+            active_prompts.insert(chat_id.to_string(), generation);
+        } else if active_prompts.get(chat_id) == Some(&generation) {
+            active_prompts.remove(chat_id);
         }
     }
 
-    fn is_prompt_active(&self, session_id: &str, generation: u64) -> bool {
+    fn is_prompt_active(&self, chat_id: &str, generation: u64) -> bool {
         self.active_prompts
             .lock()
-            .expect("hermes active prompts poisoned")
-            .get(session_id)
+            .expect("acp active prompts poisoned")
+            .get(chat_id)
             == Some(&generation)
     }
 
-    fn current_generation(&self, session_id: &str) -> Option<u64> {
+    fn current_generation(&self, chat_id: &str) -> Option<u64> {
         self.instances
             .lock()
-            .expect("hermes instances poisoned")
-            .get(session_id)
+            .expect("acp instances poisoned")
+            .get(chat_id)
             .map(|entry| entry.generation)
     }
 
-    fn is_current(&self, session_id: &str, generation: u64) -> bool {
-        self.current_generation(session_id) == Some(generation)
+    fn is_current(&self, chat_id: &str, generation: u64) -> bool {
+        self.current_generation(chat_id) == Some(generation)
     }
 
-    fn instance(&self, session_id: &str, generation: u64) -> Result<Arc<AcpInstance>> {
+    fn instance(&self, chat_id: &str, generation: u64) -> Result<Arc<AcpInstance>> {
         self.instances
             .lock()
-            .expect("hermes instances poisoned")
-            .get(session_id)
+            .expect("acp instances poisoned")
+            .get(chat_id)
             .filter(|entry| entry.generation == generation)
             .map(|entry| Arc::clone(&entry.instance))
             .ok_or_else(|| anyhow!("HERMES_SESSION_REPLACED"))
     }
 
-    fn remove_instance_if_current(&self, session_id: &str, generation: u64) -> bool {
-        let mut instances = self.instances.lock().expect("hermes instances poisoned");
-        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
+    fn remove_instance_if_current(&self, chat_id: &str, generation: u64) -> bool {
+        let mut instances = self.instances.lock().expect("acp instances poisoned");
+        if instances.get(chat_id).map(|entry| entry.generation) != Some(generation) {
             return false;
         }
-        instances.remove(session_id);
+        instances.remove(chat_id);
         true
     }
 
     fn retire_instance_if_current(
         &self,
-        session_id: &str,
+        chat_id: &str,
         generation: u64,
         emit_exit: bool,
     ) -> Result<bool> {
-        let mut instances = self.instances.lock().expect("hermes instances poisoned");
-        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
-            return Ok(false);
-        }
-        let send_result = if emit_exit {
-            self.output_channel
+        let removed_session_id = {
+            let mut instances = self.instances.lock().expect("acp instances poisoned");
+            match instances.get(chat_id) {
+                Some(entry) if entry.generation == generation => {
+                    let session_id = entry.session_id.clone();
+                    instances.remove(chat_id);
+                    session_id
+                }
+                _ => return Ok(false),
+            }
+        };
+        self.flush_timeline(chat_id);
+        if emit_exit {
+            if let Some(channel) = self
+                .output_channel
                 .lock()
-                .expect("hermes output channel poisoned")
+                .expect("acp output channel poisoned")
                 .as_ref()
                 .cloned()
-                .map(|channel| {
-                    channel.send(AgentEvent {
-                        generation,
-                        payload: AgentEventPayload::Exited {
-                            session_id: session_id.to_string(),
-                        },
-                    })
-                })
-                .transpose()
-        } else {
-            Ok(None)
-        };
-        instances.remove(session_id);
-        send_result?;
+            {
+                channel.send(AgentEvent {
+                    generation,
+                    chat_id: chat_id.to_string(),
+                    payload: AgentEventPayload::Exited {
+                        session_id: removed_session_id,
+                    },
+                })?;
+            }
+        }
         Ok(true)
     }
 
     fn send_current_event(
         &self,
-        session_id: &str,
+        chat_id: &str,
         generation: u64,
         payload: AgentEventPayload,
     ) -> Result<()> {
-        let instances = self.instances.lock().expect("hermes instances poisoned");
-        if instances.get(session_id).map(|entry| entry.generation) != Some(generation) {
-            return Ok(());
+        {
+            let instances = self.instances.lock().expect("acp instances poisoned");
+            if instances.get(chat_id).map(|entry| entry.generation) != Some(generation) {
+                return Ok(());
+            }
         }
+        self.record_payload(chat_id, &payload);
         if let Some(channel) = self
             .output_channel
             .lock()
-            .expect("hermes output channel poisoned")
+            .expect("acp output channel poisoned")
             .as_ref()
             .cloned()
         {
             channel.send(AgentEvent {
                 generation,
+                chat_id: chat_id.to_string(),
                 payload,
             })?;
         }
         Ok(())
+    }
+
+    /// Maps a live event onto the durable timeline. Chunked kinds coalesce into
+    /// one row per run; structural kinds flush and land as their own row.
+    fn record_payload(&self, chat_id: &str, payload: &AgentEventPayload) {
+        use AgentEventPayload as P;
+        let (session_id, role, kind, text): (&str, &'static str, &'static str, &str) = match payload
+        {
+            P::Message { session_id, text } => (session_id, "assistant", "message", text),
+            P::Thought { session_id, text } => (session_id, "assistant", "thought", text),
+            P::ToolCall {
+                session_id,
+                tool_call_id,
+                title,
+                tool_kind,
+                status,
+            } => {
+                self.flush_timeline(chat_id);
+                self.append_rows(
+                    session_id,
+                    chat_id,
+                    vec![timeline_row(
+                        "assistant",
+                        "toolCall",
+                        Some(tool_call_id.clone()),
+                        json!({ "title": title, "toolKind": tool_kind, "status": status })
+                            .to_string(),
+                    )],
+                );
+                return;
+            }
+            P::ToolUpdate {
+                session_id,
+                tool_call_id,
+                status,
+                content,
+            } => {
+                self.flush_timeline(chat_id);
+                self.append_rows(
+                    session_id,
+                    chat_id,
+                    vec![timeline_row(
+                        "assistant",
+                        "toolCall",
+                        Some(tool_call_id.clone()),
+                        json!({ "status": status, "content": content }).to_string(),
+                    )],
+                );
+                return;
+            }
+            P::Plan {
+                session_id,
+                entries,
+            } => {
+                self.flush_timeline(chat_id);
+                self.append_rows(
+                    session_id,
+                    chat_id,
+                    vec![timeline_row(
+                        "assistant",
+                        "plan",
+                        None,
+                        serde_json::to_string(entries).unwrap_or_default(),
+                    )],
+                );
+                return;
+            }
+            P::Permission {
+                session_id,
+                request_id,
+                title,
+                tool_kind,
+                ..
+            } => {
+                self.flush_timeline(chat_id);
+                self.append_rows(
+                    session_id,
+                    chat_id,
+                    vec![timeline_row(
+                        "assistant",
+                        "permission",
+                        Some(format!("perm-{request_id}")),
+                        json!({
+                            "requestId": request_id,
+                            "title": title,
+                            "toolKind": tool_kind,
+                            "status": "pending",
+                        })
+                        .to_string(),
+                    )],
+                );
+                return;
+            }
+            P::Error {
+                session_id,
+                message,
+            } => {
+                self.flush_timeline(chat_id);
+                self.append_rows(
+                    session_id,
+                    chat_id,
+                    vec![timeline_row("system", "error", None, message.clone())],
+                );
+                return;
+            }
+            P::TurnEnded { .. } | P::Exited { .. } => {
+                self.flush_timeline(chat_id);
+                return;
+            }
+            // The user prompt is recorded in send_message; the ACP echo is
+            // skipped so echoing providers do not double-write.
+            P::UserMessage { .. }
+            | P::Started { .. }
+            | P::SessionReplay { .. }
+            | P::Usage { .. }
+            | P::Models { .. } => return,
+        };
+        if text.is_empty() {
+            return;
+        }
+        let flushed = {
+            let mut timeline = self.timeline.lock().expect("acp timeline poisoned");
+            match timeline.get_mut(chat_id) {
+                Some(pending)
+                    if pending.kind == kind
+                        && pending.buf.len() + text.len() <= TIMELINE_FLUSH_BYTES
+                        && pending.since.elapsed() < TIMELINE_FLUSH_AGE =>
+                {
+                    pending.buf.push_str(text);
+                    None
+                }
+                _ => {
+                    let previous = timeline.remove(chat_id);
+                    timeline.insert(
+                        chat_id.to_string(),
+                        TimelinePending {
+                            session_id: session_id.to_string(),
+                            role,
+                            kind,
+                            buf: text.to_string(),
+                            since: Instant::now(),
+                        },
+                    );
+                    previous
+                }
+            }
+        };
+        if let Some(previous) = flushed {
+            self.append_rows(
+                &previous.session_id,
+                chat_id,
+                vec![timeline_row(
+                    previous.role,
+                    previous.kind,
+                    None,
+                    previous.buf,
+                )],
+            );
+        }
+    }
+
+    fn flush_timeline(&self, chat_id: &str) {
+        let pending = self
+            .timeline
+            .lock()
+            .expect("acp timeline poisoned")
+            .remove(chat_id);
+        if let Some(pending) = pending {
+            self.append_rows(
+                &pending.session_id,
+                chat_id,
+                vec![timeline_row(pending.role, pending.kind, None, pending.buf)],
+            );
+        }
+    }
+
+    /// Best-effort durable append. A failed write must never take down the live
+    /// chat stream; it is logged and the authoritative fetch simply misses the
+    /// row.
+    fn append_rows(&self, session_id: &str, chat_id: &str, entries: Vec<AgentTimelineEntry>) {
+        if entries.iter().all(|entry| entry.body.is_empty()) {
+            return;
+        }
+        if let Err(error) = super::board::request_control(ControlCommand::AgentTimelineAppend {
+            session_id: session_id.to_string(),
+            chat_id: chat_id.to_string(),
+            entries,
+        }) {
+            warn!(?error, chat_id, "agent timeline append failed");
+        }
+    }
+}
+
+fn timeline_row(
+    role: &str,
+    kind: &str,
+    entity_id: Option<String>,
+    body: String,
+) -> AgentTimelineEntry {
+    AgentTimelineEntry {
+        seq: 0,
+        role: role.to_string(),
+        kind: kind.to_string(),
+        entity_id,
+        body,
+        truncated: false,
+        created_at: 0,
     }
 }
 
@@ -983,23 +1395,65 @@ pub async fn init_agent_chat_output(
 pub async fn agent_chat_start(
     manager: State<'_, Arc<AcpManager>>,
     session_id: String,
+    provider: String,
     command_override: Option<String>,
     workspace_folder: Option<String>,
 ) -> Result<AgentStartResult, String> {
-    manager
-        .start(session_id, command_override, workspace_folder)
-        .map(|generation| AgentStartResult { generation })
-        .map_err(to_string)
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.start(session_id, provider, command_override, workspace_folder)
+    })
+    .await
+    .map_err(to_string)?
+    .map_err(to_string)
+}
+
+#[tauri::command]
+pub async fn agent_chat_list(session_id: String) -> Result<Vec<AgentChatInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match super::board::request_control(ControlCommand::AgentChatList { session_id })
+            .map_err(to_string)?
+        {
+            ControlResponse::AgentChats(chats) => Ok(chats),
+            other => Err(format!("unexpected control response: {other:?}")),
+        }
+    })
+    .await
+    .map_err(to_string)?
+}
+
+#[tauri::command]
+pub async fn agent_chat_timeline(
+    session_id: String,
+    chat_id: String,
+    after_seq: i64,
+    limit: i64,
+) -> Result<AgentTimelinePage, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        match super::board::request_control(ControlCommand::AgentTimelineFetch {
+            session_id,
+            chat_id,
+            after_seq,
+            limit,
+        })
+        .map_err(to_string)?
+        {
+            ControlResponse::AgentTimeline(page) => Ok(page),
+            other => Err(format!("unexpected control response: {other:?}")),
+        }
+    })
+    .await
+    .map_err(to_string)?
 }
 
 #[tauri::command]
 pub async fn agent_chat_new_session(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
 ) -> Result<String, String> {
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.new_session(&session_id, generation))
+    tauri::async_runtime::spawn_blocking(move || manager.new_session(&chat_id, generation))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -1008,13 +1462,13 @@ pub async fn agent_chat_new_session(
 #[tauri::command]
 pub async fn agent_chat_resume_session(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
     acp_session_id: String,
 ) -> Result<(), String> {
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || {
-        manager.resume_session(&session_id, generation, acp_session_id)
+        manager.resume_session(&chat_id, generation, acp_session_id)
     })
     .await
     .map_err(to_string)?
@@ -1024,11 +1478,11 @@ pub async fn agent_chat_resume_session(
 #[tauri::command]
 pub async fn agent_chat_list_sessions(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
 ) -> Result<Vec<AgentSessionInfo>, String> {
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.list_sessions(&session_id, generation))
+    tauri::async_runtime::spawn_blocking(move || manager.list_sessions(&chat_id, generation))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -1037,47 +1491,37 @@ pub async fn agent_chat_list_sessions(
 #[tauri::command]
 pub async fn agent_chat_send(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
     text: String,
 ) -> Result<(), String> {
-    manager
-        .send_message(session_id, generation, text)
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || manager.send_message(chat_id, generation, text))
+        .await
+        .map_err(to_string)?
         .map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn agent_chat_cancel(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
 ) -> Result<(), String> {
-    manager.cancel(&session_id, generation).map_err(to_string)
+    manager.cancel(&chat_id, generation).map_err(to_string)
 }
 
 #[tauri::command]
 pub async fn agent_chat_respond_permission(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
     request_id: u64,
     option_id: String,
 ) -> Result<(), String> {
-    manager
-        .respond_permission(&session_id, generation, request_id, option_id)
-        .map_err(to_string)
-}
-
-#[tauri::command]
-pub async fn agent_chat_set_model(
-    manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
-    generation: u64,
-    model_id: String,
-) -> Result<(), String> {
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || {
-        manager.set_model(&session_id, generation, model_id)
+        manager.respond_permission(&chat_id, generation, request_id, option_id)
     })
     .await
     .map_err(to_string)?
@@ -1085,14 +1529,28 @@ pub async fn agent_chat_set_model(
 }
 
 #[tauri::command]
+pub async fn agent_chat_set_model(
+    manager: State<'_, Arc<AcpManager>>,
+    chat_id: String,
+    generation: u64,
+    model_id: String,
+) -> Result<(), String> {
+    let manager = Arc::clone(&manager);
+    tauri::async_runtime::spawn_blocking(move || manager.set_model(&chat_id, generation, model_id))
+        .await
+        .map_err(to_string)?
+        .map_err(to_string)
+}
+
+#[tauri::command]
 pub async fn agent_chat_set_mode(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
     generation: u64,
     mode_id: String,
 ) -> Result<(), String> {
     let manager = Arc::clone(&manager);
-    tauri::async_runtime::spawn_blocking(move || manager.set_mode(&session_id, generation, mode_id))
+    tauri::async_runtime::spawn_blocking(move || manager.set_mode(&chat_id, generation, mode_id))
         .await
         .map_err(to_string)?
         .map_err(to_string)
@@ -1101,13 +1559,13 @@ pub async fn agent_chat_set_mode(
 #[tauri::command]
 pub async fn agent_chat_stop(
     manager: State<'_, Arc<AcpManager>>,
-    session_id: String,
+    chat_id: String,
 ) -> Result<(), String> {
-    manager.stop(&session_id).map_err(to_string)
+    manager.stop(&chat_id).map_err(to_string)
 }
 
-fn cleanup_agent_workspace_at(manager: &AcpManager, session_id: &str, path: &Path) -> Result<()> {
-    manager.stop(session_id)?;
+fn cleanup_agent_workspace_at(manager: &AcpManager, chat_id: &str, path: &Path) -> Result<()> {
+    manager.stop(chat_id)?;
     if path.exists() {
         std::fs::remove_dir_all(path)
             .with_context(|| format!("delete VibeLink agent workspace {}", path.display()))?;
@@ -1122,8 +1580,29 @@ pub async fn agent_workspace_cleanup(
 ) -> Result<(), String> {
     let manager = Arc::clone(&manager);
     tauri::async_runtime::spawn_blocking(move || -> Result<()> {
-        let path = agent_workspace_dir(&session_id)?;
-        cleanup_agent_workspace_at(&manager, &session_id, &path)
+        manager.stop_session_chats(&session_id);
+        let chats = match super::board::request_control(ControlCommand::AgentChatList {
+            session_id: session_id.clone(),
+        })? {
+            ControlResponse::AgentChats(chats) => chats,
+            other => bail!("unexpected control response: {other:?}"),
+        };
+        for chat in &chats {
+            let path = agent_workspace_dir(&chat.chat_id)?;
+            cleanup_agent_workspace_at(&manager, &chat.chat_id, &path)?;
+            super::board::request_control(ControlCommand::AgentChatDelete {
+                session_id: session_id.clone(),
+                chat_id: chat.chat_id.clone(),
+            })?;
+        }
+        // The legacy per-workspace directory doubles as the first Hermes chat's
+        // directory; remove it even when no chat row was ever created.
+        let legacy = agent_workspace_dir(&sanitize_session_id(&session_id))?;
+        if legacy.exists() {
+            std::fs::remove_dir_all(&legacy)
+                .with_context(|| format!("delete VibeLink agent workspace {}", legacy.display()))?;
+        }
+        Ok(())
     })
     .await
     .map_err(to_string)?
@@ -1131,6 +1610,7 @@ pub async fn agent_workspace_cleanup(
 }
 
 fn spawn_stdout_reader(
+    chat_id: String,
     session_id: String,
     generation: u64,
     stdout: impl std::io::Read + Send + 'static,
@@ -1138,57 +1618,62 @@ fn spawn_stdout_reader(
     manager: Arc<AcpManager>,
 ) {
     thread::Builder::new()
-        .name(format!("vibelink-hermes-stdout-{session_id}"))
+        .name(format!("vibelink-acp-stdout-{chat_id}"))
         .spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 match line {
                     Ok(line) if line.trim().is_empty() => continue,
                     Ok(line) => match serde_json::from_str::<Value>(&line) {
-                        Ok(value) => {
-                            route_acp_message(&session_id, generation, &value, &instance, &manager)
-                        }
-                        Err(err) => warn!(?err, line, "invalid Hermes ACP JSON"),
+                        Ok(value) => route_acp_message(
+                            &chat_id,
+                            &session_id,
+                            generation,
+                            &value,
+                            &instance,
+                            &manager,
+                        ),
+                        Err(err) => warn!(?err, line, "invalid agent ACP JSON"),
                     },
                     Err(err) => {
                         let _ = manager.send_current_event(
-                            &session_id,
+                            &chat_id,
                             generation,
                             AgentEventPayload::Error {
                                 session_id: session_id.clone(),
-                                message: format!("Hermes stdout stopped: {err}"),
+                                message: format!("agent stdout stopped: {err}"),
                             },
                         );
                         break;
                     }
                 }
             }
-            instance.fail_pending("Hermes process exited");
+            instance.fail_pending("agent process exited");
             if manager
-                .retire_instance_if_current(&session_id, generation, true)
+                .retire_instance_if_current(&chat_id, generation, true)
                 .unwrap_or(false)
             {
-                manager.set_prompt_active(&session_id, generation, false);
+                manager.set_prompt_active(&chat_id, generation, false);
             }
         })
-        .expect("spawn hermes stdout reader");
+        .expect("spawn agent stdout reader");
 }
 
 fn spawn_stderr_drain(
-    session_id: String,
+    chat_id: String,
     generation: u64,
     stderr: impl std::io::Read + Send + 'static,
     manager: Arc<AcpManager>,
 ) {
     thread::Builder::new()
-        .name(format!("vibelink-hermes-stderr-{session_id}"))
+        .name(format!("vibelink-acp-stderr-{chat_id}"))
         .spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if manager.is_current(&session_id, generation) {
-                    debug!(session_id, generation, line, "Hermes stderr");
+                if manager.is_current(&chat_id, generation) {
+                    debug!(chat_id, generation, line, "agent stderr");
                 }
             }
         })
-        .expect("spawn hermes stderr drain");
+        .expect("spawn agent stderr drain");
 }
 
 fn vibelink_mcp_servers(session_id: &str, flavor: &str) -> Value {
@@ -1269,11 +1754,13 @@ fn save_last_acp_session(path: &Path, acp_session_id: &str) -> Result<()> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handshake(
+    chat_id: &str,
     vibelink_session_id: &str,
     generation: u64,
     cwd: &str,
-    home: &Path,
+    saved_acp_session: Option<&str>,
     configured_model: Option<&HermesConfiguredModel>,
     instance: &AcpInstance,
     manager: &AcpManager,
@@ -1287,7 +1774,7 @@ fn handshake(
         }),
         Some(REQUEST_TIMEOUT),
     )?;
-    manager.instance(vibelink_session_id, generation)?;
+    manager.instance(chat_id, generation)?;
     instance.sessions_list_supported.store(
         initialize
             .pointer("/agentCapabilities/sessionCapabilities/list")
@@ -1295,12 +1782,9 @@ fn handshake(
         Ordering::Relaxed,
     );
 
-    let session_file = home.join("last-acp-session");
-    let saved_session = load_last_acp_session(&session_file)?;
-
-    let (response, resumed_session) = if let Some(session_id) = saved_session.as_deref() {
+    let (response, resumed_session) = if let Some(session_id) = saved_acp_session {
         let _ = manager.send_current_event(
-            vibelink_session_id,
+            chat_id,
             generation,
             AgentEventPayload::SessionReplay {
                 session_id: vibelink_session_id.to_string(),
@@ -1319,7 +1803,7 @@ fn handshake(
         match resume_result {
             Ok(value) => (value, Some(session_id.to_string())),
             Err(err) => {
-                warn!(?err, "Hermes session resume failed; creating new session");
+                warn!(?err, "agent session resume failed; creating new session");
                 (new_acp_session(vibelink_session_id, instance, cwd)?, None)
             }
         }
@@ -1328,9 +1812,9 @@ fn handshake(
     };
 
     finalize_acp_session(
+        chat_id,
         vibelink_session_id,
         generation,
-        home,
         configured_model,
         instance,
         manager,
@@ -1339,10 +1823,11 @@ fn handshake(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finalize_acp_session(
+    chat_id: &str,
     vibelink_session_id: &str,
     generation: u64,
-    home: &Path,
     configured_model: Option<&HermesConfiguredModel>,
     instance: &AcpInstance,
     manager: &AcpManager,
@@ -1351,20 +1836,21 @@ fn finalize_acp_session(
 ) -> Result<()> {
     let acp_session_id = acp_session_id_from_response(response, resumed_session)?;
     {
-        let instances = manager.instances.lock().expect("hermes instances poisoned");
-        if instances
-            .get(vibelink_session_id)
-            .map(|entry| entry.generation)
-            != Some(generation)
-        {
+        let instances = manager.instances.lock().expect("acp instances poisoned");
+        if instances.get(chat_id).map(|entry| entry.generation) != Some(generation) {
             bail!("HERMES_SESSION_REPLACED");
         }
-        save_last_acp_session(&home.join("last-acp-session"), &acp_session_id)?;
         *instance
             .acp_session_id
             .lock()
-            .expect("hermes acp session poisoned") = Some(acp_session_id.clone());
+            .expect("acp session poisoned") = Some(acp_session_id.clone());
     }
+    // Durable resume pointer lives on the chat row, not in a file.
+    let _ = super::board::request_control(ControlCommand::AgentChatSetAcpSession {
+        session_id: vibelink_session_id.to_string(),
+        chat_id: chat_id.to_string(),
+        acp_session_id: acp_session_id.clone(),
+    });
 
     if let Some(model) = configured_model.filter(|model| !model.provider.trim().is_empty()) {
         let model_id = acp_model_id_from_configured_model(model);
@@ -1377,10 +1863,10 @@ fn finalize_acp_session(
         }
     }
 
-    manager.instance(vibelink_session_id, generation)?;
+    manager.instance(chat_id, generation)?;
 
     manager.send_current_event(
-        vibelink_session_id,
+        chat_id,
         generation,
         AgentEventPayload::Started {
             session_id: vibelink_session_id.to_string(),
@@ -1390,7 +1876,7 @@ fn finalize_acp_session(
     let models = models_from_response(response);
     if !models.0.is_empty() || !models.1.is_empty() {
         manager.send_current_event(
-            vibelink_session_id,
+            chat_id,
             generation,
             AgentEventPayload::Models {
                 session_id: vibelink_session_id.to_string(),
@@ -1430,13 +1916,14 @@ fn require_qualified_model(model_id: &str) -> Result<()> {
 }
 
 fn route_acp_message(
+    chat_id: &str,
     vibelink_session_id: &str,
     generation: u64,
     value: &Value,
     instance: &AcpInstance,
     manager: &AcpManager,
 ) {
-    if !manager.is_current(vibelink_session_id, generation) {
+    if !manager.is_current(chat_id, generation) {
         return;
     }
     if value.get("id").is_some() && (value.get("result").is_some() || value.get("error").is_some())
@@ -1456,14 +1943,14 @@ fn route_acp_message(
 
     if value.get("method").and_then(Value::as_str) == Some("session/update") {
         if let Some(event) = translate_update(vibelink_session_id, value) {
-            let _ = manager.send_current_event(vibelink_session_id, generation, event);
+            let _ = manager.send_current_event(chat_id, generation, event);
         }
         return;
     }
 
     if value.get("method").and_then(Value::as_str) == Some("session/request_permission") {
         if let Some(event) = translate_permission(vibelink_session_id, value) {
-            let _ = manager.send_current_event(vibelink_session_id, generation, event);
+            let _ = manager.send_current_event(chat_id, generation, event);
         }
         return;
     }
@@ -1914,6 +2401,7 @@ mod tests {
     fn hermes_events_serialize_frontend_field_names() {
         let value = serde_json::to_value(AgentEvent {
             generation: 7,
+            chat_id: "chat-1".to_string(),
             payload: AgentEventPayload::Started {
                 session_id: "vibelink-session".to_string(),
                 acp_session_id: "acp-session".to_string(),
@@ -1923,6 +2411,7 @@ mod tests {
 
         assert_eq!(value["kind"], "started");
         assert_eq!(value["generation"], 7);
+        assert_eq!(value["chatId"], "chat-1");
         assert_eq!(value["sessionId"], "vibelink-session");
         assert_eq!(value["acpSessionId"], "acp-session");
         assert!(value.get("session_id").is_none());
@@ -1950,6 +2439,8 @@ mod tests {
             "session-1".to_string(),
             AcpInstanceEntry {
                 generation: 4,
+                session_id: "ws-1".to_string(),
+                provider: provider("hermes").expect("hermes provider"),
                 instance: Arc::clone(&instance),
             },
         );
@@ -1976,6 +2467,8 @@ mod tests {
             "session-cleanup".to_string(),
             AcpInstanceEntry {
                 generation: 8,
+                session_id: "ws-cleanup".to_string(),
+                provider: provider("hermes").expect("hermes provider"),
                 instance: Arc::clone(&instance),
             },
         );
@@ -2007,6 +2500,8 @@ mod tests {
             "session-1".to_string(),
             AcpInstanceEntry {
                 generation: 2,
+                session_id: "ws-1".to_string(),
+                provider: provider("hermes").expect("hermes provider"),
                 instance: Arc::clone(&current),
             },
         );
@@ -2019,6 +2514,7 @@ mod tests {
 
         route_acp_message(
             "session-1",
+            "ws-1",
             1,
             &json!({ "jsonrpc": "2.0", "id": 9, "result": {} }),
             &stale,

@@ -107,7 +107,7 @@ vi.mock('@tauri-apps/api/core', () => ({
     }
     if (command === 'hermes_runtime_status') return { detected: true, command: 'hermes-acp.exe', cliCommand: 'hermes.exe', version: '0.18.2', home: 'C:/hermes', source: 'path', configuredModel: { provider: 'openai-codex', model: 'gpt-5.5' } }
     if (command === 'git_snapshot_baseline') return 'HEAD'
-    if (command === 'agent_chat_start') return { generation: 1 }
+    if (command === 'agent_chat_start') return { generation: 1, chatId: 'chat-a' }
     return null
   }),
 }))
