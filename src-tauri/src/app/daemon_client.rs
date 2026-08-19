@@ -578,6 +578,13 @@ fn handle_remote_browser_request(shared: &Arc<ClientShared>, request: RemoteBrow
                     "browser_unavailable: desktop browser host is unavailable".to_string()
                 })
                 .and_then(|app| {
+                    if request.method.starts_with("agent.") {
+                        return super::acp::handle_remote_agent_request(
+                            app,
+                            &request.method,
+                            &request.payload_json,
+                        );
+                    }
                     let manager = app
                         .state::<super::browser::ManagedBrowser>()
                         .inner()
@@ -796,6 +803,7 @@ fn response_req(msg: &DaemonToClient) -> Option<Req> {
         | DaemonToClient::SessionChanged { .. }
         | DaemonToClient::WorktreeChanged { .. }
         | DaemonToClient::RemotePaneLease { .. }
+        | DaemonToClient::AgentTimelineAppended { .. }
         | DaemonToClient::RemoteBrowserRequest { .. }
         | DaemonToClient::TaskEvent { .. } => None,
     }

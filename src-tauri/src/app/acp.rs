@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{ipc::Channel, State};
+use tauri::{ipc::Channel, Manager, State};
 use tracing::{debug, warn};
 
 use super::hermes::{
@@ -1085,6 +1085,7 @@ impl AcpManager {
                 request_id,
                 title,
                 tool_kind,
+                options,
                 ..
             } => {
                 self.flush_timeline(chat_id);
@@ -1100,6 +1101,14 @@ impl AcpManager {
                             "title": title,
                             "toolKind": tool_kind,
                             "status": "pending",
+                            "options": options
+                                .iter()
+                                .map(|option| json!({
+                                    "optionId": option.option_id,
+                                    "name": option.name,
+                                    "kind": option.kind,
+                                }))
+                                .collect::<Vec<_>>(),
                         })
                         .to_string(),
                     )],
@@ -1203,6 +1212,107 @@ impl AcpManager {
         }) {
             warn!(?error, chat_id, "agent timeline append failed");
         }
+    }
+}
+
+/// Remote (mobile) agent requests relayed from the daemon over the desktop
+/// host channel. The relay waits at most a few seconds, so a prompt against a
+/// chat that is not running kicks off the start in the background and returns
+/// `agent_starting` for the client to retry — it never blocks on a handshake.
+pub fn handle_remote_agent_request(
+    app: &tauri::AppHandle,
+    method: &str,
+    payload_json: &str,
+) -> std::result::Result<Value, String> {
+    let payload: Value = serde_json::from_str(payload_json).map_err(to_string)?;
+    let manager = Arc::clone(app.state::<Arc<AcpManager>>().inner());
+    match method {
+        "agent.prompt" => {
+            let chat_id = payload
+                .get("chatId")
+                .and_then(Value::as_str)
+                .ok_or("chatId is required")?
+                .to_string();
+            let session_id = payload
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .ok_or("sessionId is required")?
+                .to_string();
+            let text = payload
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("text is required")?
+                .to_string();
+            if text.trim().is_empty() {
+                return Err("text is required".to_string());
+            }
+            match manager.current_generation(&chat_id) {
+                Some(generation) => {
+                    let ready = manager
+                        .instance(&chat_id, generation)
+                        .ok()
+                        .is_some_and(|instance| instance.acp_session_id().is_ok());
+                    if !ready {
+                        return Err("agent_starting: chat is still handshaking; retry".to_string());
+                    }
+                    manager
+                        .send_message(chat_id.clone(), generation, text)
+                        .map_err(to_string)?;
+                    Ok(json!({ "queued": true, "chatId": chat_id }))
+                }
+                None => {
+                    let chats = match super::board::request_control(ControlCommand::AgentChatList {
+                        session_id: session_id.clone(),
+                    })
+                    .map_err(to_string)?
+                    {
+                        ControlResponse::AgentChats(chats) => chats,
+                        other => return Err(format!("unexpected control response: {other:?}")),
+                    };
+                    let chat = chats
+                        .into_iter()
+                        .find(|chat| chat.chat_id == chat_id)
+                        .ok_or("unknown chat")?;
+                    let spawn_manager = Arc::clone(&manager);
+                    let workspace_folder = Some(chat.cwd.clone());
+                    thread::Builder::new()
+                        .name(format!("vibelink-remote-agent-start-{chat_id}"))
+                        .spawn(move || {
+                            let _ = spawn_manager.start(
+                                chat.session_id,
+                                chat.provider,
+                                None,
+                                workspace_folder,
+                            );
+                        })
+                        .map_err(to_string)?;
+                    Err("agent_starting: chat is starting; retry".to_string())
+                }
+            }
+        }
+        "agent.permission.resolve" => {
+            let chat_id = payload
+                .get("chatId")
+                .and_then(Value::as_str)
+                .ok_or("chatId is required")?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_u64)
+                .ok_or("requestId is required")?;
+            let option_id = payload
+                .get("optionId")
+                .and_then(Value::as_str)
+                .ok_or("optionId is required")?
+                .to_string();
+            let generation = manager
+                .current_generation(chat_id)
+                .ok_or("agent_not_running: chat has no live instance")?;
+            manager
+                .respond_permission(chat_id, generation, request_id, option_id)
+                .map_err(to_string)?;
+            Ok(json!({ "resolved": true }))
+        }
+        other => Err(format!("unsupported agent host method {other}")),
     }
 }
 

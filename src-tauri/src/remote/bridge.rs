@@ -29,7 +29,6 @@ use super::{
     },
     server::{desktop_name, legacy_appearance_payload, RemotePush, RemoteShared},
 };
-use crate::dedicated_cli::{parse_args as parse_cli_args, CliControlRequest};
 use crate::{
     app::spawn_daemon,
     protocol::{
@@ -1151,6 +1150,26 @@ fn run_v2_authenticated(
                             &event,
                         )?;
                     }
+                }
+                DaemonToClient::AgentTimelineAppended {
+                    session_id,
+                    chat_id,
+                    first_sequence,
+                    last_sequence,
+                } => {
+                    send_v2_projection_event(
+                        ws,
+                        transport,
+                        session_epoch,
+                        "agent",
+                        "timeline.appended",
+                        &json!({
+                            "workspaceId": session_id,
+                            "chatId": chat_id,
+                            "firstSequence": first_sequence,
+                            "lastSequence": last_sequence,
+                        }),
+                    )?;
                 }
                 DaemonToClient::SessionChanged { .. } | DaemonToClient::PaneExited { .. } => {
                     refresh_projection = true;
@@ -2785,6 +2804,86 @@ fn handle_v2_request(
                 &request.payload,
             )
         }
+        ("agent", method) => {
+            require_grant(grants, "orchestration.view")?;
+            if !matches!(method, "sessions.list" | "timeline") {
+                require_grant(grants, "orchestration.control")?;
+            }
+            let operation_id = Uuid::parse_str(&request.operation_id)?;
+            match method {
+                "sessions.list" => {
+                    let session_id = v2_uuid(&request.payload, "workspaceId")?.to_string();
+                    let response = v2_control_call(
+                        daemon_writer,
+                        daemon_inbox,
+                        next_req,
+                        operation_id,
+                        &crate::control_plane::ControlCommand::AgentChatList { session_id },
+                    )?;
+                    match response {
+                        crate::control_plane::ControlResponse::AgentChats(chats) => Ok(json!({
+                            "chats": chats
+                                .into_iter()
+                                .map(|chat| json!({
+                                    "chatId": chat.chat_id,
+                                    "sessionId": chat.session_id,
+                                    "provider": chat.provider,
+                                    "title": chat.title,
+                                    "updatedAt": chat.updated_at,
+                                }))
+                                .collect::<Vec<_>>(),
+                        })),
+                        other => bail!("unexpected control response: {other:?}"),
+                    }
+                }
+                "timeline" => {
+                    let session_id = v2_uuid(&request.payload, "workspaceId")?.to_string();
+                    let chat_id = request
+                        .payload
+                        .get("chatId")
+                        .and_then(Value::as_str)
+                        .context("chatId is required")?
+                        .to_string();
+                    let after_seq = request
+                        .payload
+                        .get("afterSequence")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0);
+                    let limit = request
+                        .payload
+                        .get("limit")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(50)
+                        .clamp(1, 50);
+                    let response = v2_control_call(
+                        daemon_writer,
+                        daemon_inbox,
+                        next_req,
+                        operation_id,
+                        &crate::control_plane::ControlCommand::AgentTimelineFetch {
+                            session_id,
+                            chat_id,
+                            after_seq,
+                            limit,
+                        },
+                    )?;
+                    match response {
+                        crate::control_plane::ControlResponse::AgentTimeline(page) => {
+                            Ok(serde_json::to_value(page)?)
+                        }
+                        other => bail!("unexpected control response: {other:?}"),
+                    }
+                }
+                _ => v2_orchestration_call(
+                    daemon_writer,
+                    daemon_inbox,
+                    next_req,
+                    operation_id,
+                    &format!("agent.{method}"),
+                    &request.payload,
+                ),
+            }
+        }
         ("browser", method) => {
             let read_only = matches!(
                 method,
@@ -2831,35 +2930,36 @@ fn handle_v2_request(
                 }
             }
         }
-        (domain @ ("computer" | "automation" | "skill" | "remote"), method) => {
-            let grant = match domain {
-                "computer"
-                    if matches!(
-                        method,
-                        "capabilities" | "list-apps" | "list-windows" | "get-app-state"
-                    ) =>
-                {
-                    "computer.observe"
-                }
-                "computer" => "computer.control",
-                "automation" => "orchestration.control",
-                _ => "admin",
-            };
-            require_grant(grants, grant)?;
-            dispatch_v2_cli(
-                request,
-                domain,
-                method,
-                daemon_writer,
-                daemon_inbox,
-                next_req,
-            )
-        }
         _ => bail!(
             "unsupported remote-v2 method {}.{}",
             request.domain,
             request.method
         ),
+    }
+}
+
+fn v2_control_call(
+    daemon_writer: &mut interprocess::local_socket::SendHalf,
+    daemon_inbox: &mut DaemonInbox,
+    next_req: &mut u64,
+    operation_id: Uuid,
+    command: &crate::control_plane::ControlCommand,
+) -> Result<crate::control_plane::ControlResponse> {
+    let req = take_req(next_req);
+    match request_reply(
+        daemon_writer,
+        daemon_inbox,
+        req,
+        ClientToDaemon::Control {
+            req,
+            operation_id,
+            command_json: serde_json::to_string(command)?,
+        },
+    )? {
+        ReplyResult::Control(response) => {
+            serde_json::from_str(&response).context("parse control response")
+        }
+        other => bail!("unexpected control reply: {other:?}"),
     }
 }
 
@@ -3253,62 +3353,6 @@ fn pump_v2_browser_screencasts(
     Ok(())
 }
 
-fn dispatch_v2_cli(
-    request: &V2Envelope,
-    domain: &str,
-    method: &str,
-    daemon_writer: &mut interprocess::local_socket::SendHalf,
-    daemon_inbox: &mut DaemonInbox,
-    next_req: &mut u64,
-) -> Result<Value> {
-    let mut args = vec![domain.to_string(), method.to_string()];
-    if let Some(extra) = request.payload.get("args").and_then(Value::as_array) {
-        for argument in extra {
-            args.push(
-                argument
-                    .as_str()
-                    .context("remote-v2 CLI args must be strings")?
-                    .to_string(),
-            );
-        }
-    }
-    let invocation = parse_cli_args(args).map_err(|error| anyhow!(error.to_string()))?;
-    let cli_request = CliControlRequest {
-        schema_version: crate::dedicated_cli::COMMAND_SCHEMA_VERSION,
-        operation_id: Uuid::parse_str(&request.operation_id)?,
-        expected_revision: request
-            .payload
-            .get("expectedRevision")
-            .and_then(Value::as_u64),
-        caller_cwd: None,
-        command: invocation.command,
-    };
-    let request_json = serde_json::to_string(&json!({ "kind": "cli", "request": cli_request }))?;
-    let req = take_req(next_req);
-    match request_reply(
-        daemon_writer,
-        daemon_inbox,
-        req,
-        ClientToDaemon::Cli {
-            req,
-            operation_id: cli_request.operation_id,
-            request_json,
-        },
-    )? {
-        ReplyResult::Cli(response) => {
-            let value: Value = serde_json::from_str(&response)?;
-            if value.get("ok").and_then(Value::as_bool) == Some(false) {
-                bail!(
-                    "remote CLI request failed: {}",
-                    value.get("error").cloned().unwrap_or(Value::Null)
-                );
-            }
-            Ok(value.get("result").cloned().unwrap_or(Value::Null))
-        }
-        other => bail!("unexpected remote CLI reply: {other:?}"),
-    }
-}
-
 fn handle_v2_attachment_upload(
     payload: &Value,
     uploads: &mut V2AttachmentUploads,
@@ -3453,6 +3497,15 @@ fn handle_v2_git(
         "diff" => vec!["diff", "--no-ext-diff"],
         "stage" => vec![
             "add",
+            request
+                .payload
+                .get("path")
+                .and_then(Value::as_str)
+                .context("path is required")?,
+        ],
+        "unstage" => vec![
+            "restore",
+            "--staged",
             request
                 .payload
                 .get("path")

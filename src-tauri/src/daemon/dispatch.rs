@@ -427,6 +427,21 @@ fn dispatch_orchestration_rpc(
                 request.limit,
             ))
         }
+        "agent.prompt" | "agent.permission.resolve" => {
+            // The ACP chat runtime lives in the desktop app process; relay over
+            // the registered desktop host channel (same path the in-app browser
+            // uses for remote automation).
+            let result = dispatch_browser_host_request(
+                operation_id,
+                method.to_string(),
+                payload_json.to_string(),
+            )
+            .map_err(orchestration_internal_error)?;
+            serde_json::from_str::<Value>(&result).map_err(|error| OrchestrationRpcError {
+                code: "internal".to_string(),
+                message: format!("parse agent host response: {error}"),
+            })
+        }
         "notifications.catchup" => {
             let request: NotificationCatchupRequest = parse_orchestration_payload(payload_json)?;
             coordinator_value(
@@ -3876,7 +3891,32 @@ pub(super) fn dispatch_message(
         } => {
             let command: ControlCommand =
                 serde_json::from_str(&command_json).context("parse control command")?;
+            let append_info = match &command {
+                ControlCommand::AgentTimelineAppend {
+                    session_id,
+                    chat_id,
+                    entries,
+                } => Some((session_id.clone(), chat_id.clone(), entries.len() as i64)),
+                _ => None,
+            };
             let response = control.execute(operation_id, command)?;
+            if let (
+                Some((session_id, chat_id, appended)),
+                crate::control_plane::ControlResponse::TimelineAppended { last_seq },
+            ) = (append_info, &response)
+            {
+                if appended > 0 {
+                    let senders = lock_state(&state).all_senders();
+                    for sender in senders {
+                        let _ = sender.send(DaemonToClient::AgentTimelineAppended {
+                            session_id: session_id.clone(),
+                            chat_id: chat_id.clone(),
+                            first_sequence: last_seq - appended + 1,
+                            last_sequence: *last_seq,
+                        });
+                    }
+                }
+            }
             send(
                 tx,
                 DaemonToClient::Reply {

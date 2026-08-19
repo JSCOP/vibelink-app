@@ -427,8 +427,6 @@ fn is_known_grant(grant: &str) -> bool {
             | "browser.control"
             | "files.view"
             | "git.write"
-            | "computer.observe"
-            | "computer.control"
             | "admin"
     )
 }

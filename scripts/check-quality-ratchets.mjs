@@ -31,7 +31,7 @@ const sourceBudgets = {
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
   // 2026-08-20: +chat-id keying, provider table, durable timeline recorder.
-  'src-tauri/src/app/acp.rs': 2727,
+  'src-tauri/src/app/acp.rs': 2_836,
   'src-tauri/src/app/hermes.rs': 439,
   // 2026-08-20: +agent-chat/timeline command variants and dispatch arms; the SQL
   // itself lives in agent_timeline.rs to keep this file from regrowing.
@@ -52,7 +52,7 @@ const sourceBudgets = {
   'src-tauri/src/app/fsops.rs': 1_704,
   // One arm per protocol message, so SetPaneSnapshot costs ten lines here.
   // 2026-08-20: +ReportPaneScreenState and setDeviceGrants dispatch arms.
-  'src-tauri/src/daemon/dispatch.rs': 4_815,
+  'src-tauri/src/daemon/dispatch.rs': 4_839,
   'src-tauri/src/daemon/tests.rs': 1_580,
   'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
   'src-tauri/src/app/provider_integrations.rs': 2_056,

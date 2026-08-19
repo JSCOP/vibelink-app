@@ -1,5 +1,5 @@
 {
-  "contractVersion": 3,
+  "contractVersion": 4,
   "protocolVersion": 2,
   "subprotocol": "vibelink-remote-v2",
   "noiseSuite": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
@@ -51,8 +51,7 @@
       "orchestration",
       "files",
       "git",
-      "account",
-      "dictation"
+      "agent"
     ]
   },
   "canonicalKeys": {
@@ -1508,6 +1507,32 @@
         "appearance"
       ],
       "additionalProperties": false
+    },
+    "AgentTimelineAppendedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspaceId",
+        "chatId",
+        "firstSequence",
+        "lastSequence"
+      ],
+      "properties": {
+        "workspaceId": {
+          "type": "string"
+        },
+        "chatId": {
+          "type": "string"
+        },
+        "firstSequence": {
+          "type": "integer",
+          "format": "uint64"
+        },
+        "lastSequence": {
+          "type": "integer",
+          "format": "uint64"
+        }
+      }
     }
   },
   "methods": {
@@ -1723,6 +1748,40 @@
         }
       }
     },
+    "agent": {
+      "sessions.list": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "timeline": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "prompt": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "permission.resolve": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      }
+    },
     "browser": {
       "tabs": {
         "params": {
@@ -1854,7 +1913,7 @@
           "$ref": "#/types/OpaqueObject"
         }
       },
-      "diff": {
+      "write": {
         "params": {
           "$ref": "#/types/OpaqueObject"
         },
@@ -1873,6 +1932,22 @@
     },
     "git": {
       "status": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "log": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "diff": {
         "params": {
           "$ref": "#/types/OpaqueObject"
         },
@@ -1903,50 +1978,6 @@
         "result": {
           "$ref": "#/types/OpaqueObject"
         }
-      },
-      "worktree.create": {
-        "params": {
-          "$ref": "#/types/OpaqueObject"
-        },
-        "result": {
-          "$ref": "#/types/OpaqueObject"
-        }
-      },
-      "review.comment": {
-        "params": {
-          "$ref": "#/types/OpaqueObject"
-        },
-        "result": {
-          "$ref": "#/types/OpaqueObject"
-        }
-      }
-    },
-    "account": {
-      "summary": {
-        "params": {
-          "$ref": "#/types/OpaqueObject"
-        },
-        "result": {
-          "$ref": "#/types/OpaqueObject"
-        }
-      },
-      "usage": {
-        "params": {
-          "$ref": "#/types/OpaqueObject"
-        },
-        "result": {
-          "$ref": "#/types/OpaqueObject"
-        }
-      }
-    },
-    "dictation": {
-      "transcribe": {
-        "params": {
-          "$ref": "#/types/OpaqueObject"
-        },
-        "result": {
-          "$ref": "#/types/OpaqueObject"
-        }
       }
     }
   },
@@ -1968,6 +1999,9 @@
     },
     "appearance.changed": {
       "$ref": "#/types/AppearanceChangedEvent"
+    },
+    "agent.timeline.appended": {
+      "$ref": "#/types/AgentTimelineAppendedEvent"
     }
   },
   "capabilities": [
@@ -1979,8 +2013,6 @@
     "browser.control",
     "files.view",
     "git.write",
-    "computer.observe",
-    "computer.control",
     "admin"
   ],
   "errors": [
@@ -2024,7 +2056,8 @@
     "desktopChannelsPerHost": 1,
     "plaintextLogging": false,
     "fallbackCircuitBreakerFailures": 3,
-    "fallbackCircuitBreakerCooldownMs": 30000
+    "fallbackCircuitBreakerCooldownMs": 30000,
+    "desktopRoutingPrefix": "u8-length-prefixed-resume-id"
   },
   "notifications": {
     "payloadContainsContent": false,

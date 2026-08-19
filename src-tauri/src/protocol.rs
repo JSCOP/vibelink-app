@@ -686,6 +686,13 @@ pub enum DaemonToClient {
         session_id: Uuid,
         event: TaskSignal,
     },
+    /// A durable agent-chat timeline gained rows; clients fetch the page.
+    AgentTimelineAppended {
+        session_id: String,
+        chat_id: String,
+        first_sequence: i64,
+        last_sequence: i64,
+    },
     RemotePaneLease {
         event: RemotePaneLeaseEvent,
     },

@@ -1,6 +1,6 @@
 {
   "fixtureVersion": 1,
-  "contractVersion": 3,
+  "contractVersion": 4,
   "protocolVersion": 2,
   "subprotocol": "vibelink-remote-v2",
   "generatedAt": "2026-01-02T03:04:05.000Z",
@@ -244,6 +244,15 @@
           "alarmHighlightColor": "#7ee787",
           "reviewedPaneHighlightColor": "#58a6ff"
         }
+      }
+    },
+    {
+      "event": "agent.timeline.appended",
+      "payload": {
+        "workspaceId": "4f6bafb1-93d2-4d3c-bb46-86b7f2f4f6a1",
+        "chatId": "4f6bafb1-93d2-4d3c-bb46-86b7f2f4f6a1",
+        "firstSequence": 41,
+        "lastSequence": 43
       }
     }
   ],
