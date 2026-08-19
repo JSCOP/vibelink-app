@@ -1,5 +1,5 @@
 {
-  "contractVersion": 4,
+  "contractVersion": 5,
   "protocolVersion": 2,
   "subprotocol": "vibelink-remote-v2",
   "noiseSuite": "Noise_XX_25519_ChaChaPoly_BLAKE2s",
@@ -1578,6 +1578,14 @@
         "result": {
           "$ref": "#/types/Empty"
         }
+      },
+      "create": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
       }
     },
     "terminal": {
@@ -1643,6 +1651,22 @@
         },
         "result": {
           "$ref": "#/types/TerminalLeaseStatusResult"
+        }
+      },
+      "create": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
+        }
+      },
+      "close": {
+        "params": {
+          "$ref": "#/types/OpaqueObject"
+        },
+        "result": {
+          "$ref": "#/types/OpaqueObject"
         }
       }
     },

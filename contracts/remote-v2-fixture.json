@@ -1,6 +1,6 @@
 {
   "fixtureVersion": 1,
-  "contractVersion": 4,
+  "contractVersion": 5,
   "protocolVersion": 2,
   "subprotocol": "vibelink-remote-v2",
   "generatedAt": "2026-01-02T03:04:05.000Z",

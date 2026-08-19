@@ -2475,6 +2475,42 @@ fn handle_v2_request(
                 workspaces: projection.workspaces()?,
             })?)
         }
+        ("workspace", "create") => {
+            // Spawning a workspace grants no power terminal.input does not
+            // already have: an existing pane can run arbitrary commands anyway.
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let name = request
+                .payload
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .context("name is required")?
+                .to_string();
+            let workspace_folder = request
+                .payload
+                .get("workspaceFolder")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let req = take_req(next_req);
+            match request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::CreateSession {
+                    req,
+                    name,
+                    workspace_folder,
+                },
+            )? {
+                ReplyResult::SessionCreated(session) => {
+                    Ok(json!({ "workspaceId": session.id.to_string(), "name": session.name }))
+                }
+                other => bail!("unexpected create reply: {other:?}"),
+            }
+        }
         ("workspace", "attach") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
             let params: WorkspaceAttachParams = serde_json::from_value(request.payload.clone())
@@ -2539,6 +2575,69 @@ fn handle_v2_request(
                 request_v2_workspace_projection(daemon_writer, daemon_inbox, next_req, None)?;
             projection.replace_for_request(snapshot)?;
             Ok(json!({}))
+        }
+        ("terminal", "create") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let workspace_id = v2_uuid(&request.payload, "workspaceId")?;
+            let title = request
+                .payload
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let cfg = crate::protocol::PaneConfig {
+                pane_id: Uuid::new_v4(),
+                // None lets the daemon pick its resolved default shell (pwsh).
+                shell: None,
+                args: Vec::new(),
+                cwd: None,
+                env: Vec::new(),
+                title,
+                icon: None,
+                profile_id: None,
+                role: None,
+                restore_on_start: false,
+                cols: 120,
+                rows: 30,
+            };
+            let pane_id = cfg.pane_id;
+            let req = take_req(next_req);
+            match request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::SpawnPane {
+                    req,
+                    session_id: workspace_id,
+                    cfg,
+                    attach: false,
+                },
+            )? {
+                ReplyResult::PaneSpawned(_) | ReplyResult::Ok => {
+                    Ok(json!({ "paneId": pane_id.to_string() }))
+                }
+                other => bail!("unexpected spawn reply: {other:?}"),
+            }
+        }
+        ("terminal", "close") => {
+            require_grant(grants, TERMINAL_INPUT_GRANT)?;
+            let workspace_id = v2_uuid(&request.payload, "workspaceId")?;
+            let pane_id = v2_uuid(&request.payload, "paneId")?;
+            let req = take_req(next_req);
+            match request_reply(
+                daemon_writer,
+                daemon_inbox,
+                req,
+                ClientToDaemon::ClosePane {
+                    req,
+                    session_id: workspace_id,
+                    pane_id,
+                },
+            )? {
+                ReplyResult::Ok => Ok(json!({})),
+                other => bail!("unexpected close reply: {other:?}"),
+            }
         }
         ("terminal", "ack") => {
             require_grant(grants, TERMINAL_VIEW_GRANT)?;
