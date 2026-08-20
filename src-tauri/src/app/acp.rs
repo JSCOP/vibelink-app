@@ -38,6 +38,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A provider is a value, not a trait: everything after spawn is plain ACP.
+// `resolve` is a plain fn pointer to keep `PROVIDERS` a `const` table; a type alias would only
+// rename the same signature, and a trait object cannot live in a const.
+#[allow(clippy::type_complexity)]
 pub struct AcpProvider {
     pub id: &'static str,
     resolve: fn(Option<String>) -> Result<(String, Vec<String>)>,
