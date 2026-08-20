@@ -1,3 +1,5 @@
+// Only the ConPTY staging path reads or copies files, and that path is Windows-only.
+#[cfg(windows)]
 use std::{
     fs,
     io::{self, Read},

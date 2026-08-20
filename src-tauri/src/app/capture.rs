@@ -14,6 +14,7 @@ use std::{
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+#[cfg(not(target_os = "linux"))]
 use xcap::Monitor;
 
 #[cfg(windows)]
@@ -486,7 +487,7 @@ fn copy_rgba_to_clipboard(width: u32, height: u32, bytes: Vec<u8>) -> Result<(),
 }
 
 fn copy_png_to_clipboard(png_bytes: &[u8]) -> Result<(), String> {
-    let image = xcap::image::load_from_memory(png_bytes)
+    let image = image::load_from_memory(png_bytes)
         .map_err(to_string)?
         .to_rgba8();
     copy_rgba_to_clipboard(image.width(), image.height(), image.into_raw())
@@ -830,8 +831,13 @@ fn monitor_crop(region: CaptureMonitorRect, monitor: CaptureMonitorRect) -> Opti
     })
 }
 
-#[tauri::command]
-pub async fn capture_region_image(
+/// Stitches every display the region intersects into one image.
+///
+/// Kept behind the command so the Tauri surface stays identical on every target: a build
+/// without a screen-capture backend answers a structured error instead of dropping the
+/// command out of the handler list.
+#[cfg(not(target_os = "linux"))]
+async fn capture_region_impl(
     dir: String,
     file_name: String,
     x: i32,
@@ -854,7 +860,7 @@ pub async fn capture_region_image(
     // every intersecting display is grabbed and blitted into one image. Areas
     // the region covers but no monitor does stay transparent rather than
     // silently becoming black.
-    let mut stitched = xcap::image::RgbaImage::new(w, h);
+    let mut stitched = image::RgbaImage::new(w, h);
     let mut captured_any = false;
     for monitor in Monitor::all().map_err(to_string)? {
         let bounds = CaptureMonitorRect {
@@ -869,7 +875,7 @@ pub async fn capture_region_image(
         let source = monitor
             .capture_region(crop.src_x, crop.src_y, crop.width, crop.height)
             .map_err(to_string)?;
-        xcap::image::imageops::replace(
+        image::imageops::replace(
             &mut stitched,
             &source,
             crop.dest_x as i64,
@@ -883,10 +889,34 @@ pub async fn capture_region_image(
 
     let output = unique_path(&dir, &file_name);
     stitched
-        .save_with_format(&output, xcap::image::ImageFormat::Png)
+        .save_with_format(&output, image::ImageFormat::Png)
         .map_err(to_string)?;
     copy_rgba_to_clipboard(stitched.width(), stitched.height(), stitched.into_raw())?;
     Ok(output.to_string_lossy().to_string())
+}
+
+#[cfg(target_os = "linux")]
+async fn capture_region_impl(
+    _dir: String,
+    _file_name: String,
+    _x: i32,
+    _y: i32,
+    _w: u32,
+    _h: u32,
+) -> Result<String, String> {
+    Err("screen capture has no backend on this platform".to_string())
+}
+
+#[tauri::command]
+pub async fn capture_region_image(
+    dir: String,
+    file_name: String,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+) -> Result<String, String> {
+    capture_region_impl(dir, file_name, x, y, w, h).await
 }
 
 #[tauri::command]

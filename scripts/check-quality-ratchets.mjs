@@ -31,7 +31,8 @@ const sourceBudgets = {
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
   // 2026-08-20: +chat-id keying, provider table, durable timeline recorder.
-  'src-tauri/src/app/acp.rs': 2_865,
+  // 2026-08-20: +1 for the clippy::type_complexity allow that restores the -D warnings gate.
+  'src-tauri/src/app/acp.rs': 2_866,
   'src-tauri/src/app/hermes.rs': 439,
   // 2026-08-20: +agent-chat/timeline command variants and dispatch arms; the SQL
   // itself lives in agent_timeline.rs to keep this file from regrowing.

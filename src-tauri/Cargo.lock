@@ -110,6 +110,7 @@ dependencies = [
  "cron",
  "crossbeam-channel",
  "directories",
+ "image",
  "indexmap 2.14.0",
  "interprocess",
  "keyring",

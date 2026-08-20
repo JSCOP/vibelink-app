@@ -38,7 +38,10 @@ serde_bytes = "0.11"
 portable-pty = "0.9"
 interprocess = "2"
 directories = "6"
-xcap = "0.9.6"
+# `image` is used directly for the PNG paths so the screen-capture backend can be target-gated
+# without taking the image codecs with it; on targets that keep xcap this is the same crate it
+# re-exports, and Cargo unions the features.
+image = { version = "0.25", default-features = false, features = ["png"] }
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 crossbeam-channel = "0.5"
@@ -101,6 +104,12 @@ windows = { version = "=0.61.3", features = [
 ] }
 
 # Signals and process groups replace the Windows Job Object for child lifetime containment.
+# xcap's Linux backend builds against PipeWire headers and fails to compile on the supported
+# build floor. Screen capture is a Windows/macOS surface today, so the dependency follows it
+# rather than dragging PipeWire, xcb and libclang into every Linux build.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9.6"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
