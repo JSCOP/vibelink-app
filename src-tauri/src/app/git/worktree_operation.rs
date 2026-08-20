@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use super::exec::CREATE_NO_WINDOW;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};

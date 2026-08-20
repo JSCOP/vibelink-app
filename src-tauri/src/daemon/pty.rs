@@ -395,6 +395,23 @@ impl MasterPty for FakeMaster {
     fn take_writer(&self) -> Result<Box<dyn Write + Send>> {
         Ok(Box::new(std::io::sink()))
     }
+
+    // `MasterPty` requires these on unix. The fake owns no descriptor and no session, so every
+    // answer is "nothing here" rather than a fabricated pid or fd.
+    #[cfg(unix)]
+    fn process_group_leader(&self) -> Option<libc::pid_t> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn as_raw_fd(&self) -> Option<portable_pty::unix::RawFd> {
+        None
+    }
+
+    #[cfg(unix)]
+    fn tty_name(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 fn command_builder(config: &PaneConfig) -> CommandBuilder {

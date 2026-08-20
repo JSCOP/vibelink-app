@@ -41,7 +41,7 @@ use std::time::Duration;
 use tauri::State;
 use uuid::Uuid;
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 use self::exec::CREATE_NO_WINDOW;
 #[cfg(all(test, windows))]
 use std::os::windows::process::CommandExt;

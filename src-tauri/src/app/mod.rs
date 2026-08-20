@@ -71,7 +71,7 @@ fn platform_browser_provider(
     _registry_path: std::path::PathBuf,
     _main_cdp_port: u16,
 ) -> Arc<PlatformBrowserProvider> {
-    Arc::new(PlatformBrowserProvider)
+    Arc::new(crate::browser::UnsupportedBrowserProvider)
 }
 
 /// Exit policy shared with the frontend `settings.sessionRestore`.

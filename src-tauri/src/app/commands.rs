@@ -229,7 +229,15 @@ pub fn terminal_ws_token(client: State<'_, DaemonClient>) -> Result<String, Stri
 
 #[tauri::command]
 pub fn webview_render_mode() -> &'static str {
-    crate::app::webview_renderer::resolved_renderer_mode()
+    #[cfg(windows)]
+    {
+        crate::app::webview_renderer::resolved_renderer_mode()
+    }
+    // The renderer override is a WebView2 concern; every other target reports the platform default.
+    #[cfg(not(windows))]
+    {
+        "default"
+    }
 }
 
 #[tauri::command]

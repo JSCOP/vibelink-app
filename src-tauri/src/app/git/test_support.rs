@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use super::exec::CREATE_NO_WINDOW;
 use std::path::{Path, PathBuf};
 use std::process::Command;

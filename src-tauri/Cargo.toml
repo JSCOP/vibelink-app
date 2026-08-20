@@ -114,6 +114,10 @@ xcap = "0.9.6"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# `WebviewWindowBuilder::transparent` is compiled out on macOS unless this feature is on,
+# and the capture overlay builder is shared by every target. Windows is unaffected: Cargo
+# only applies this to macOS builds.
+tauri = { version = "=2.11.3", features = ["macos-private-api"] }
 keyring = { version = "3", features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
