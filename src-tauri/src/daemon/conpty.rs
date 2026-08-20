@@ -1,5 +1,8 @@
+// `PathBuf` is in the signature of the non-Windows no-op too, so only `Path` follows the
+// Windows-and-tests items.
 #[cfg(any(windows, test))]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 
 #[cfg(any(windows, test))]
 const CONPTY_DLL: &str = "conpty.dll";
