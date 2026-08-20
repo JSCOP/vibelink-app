@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 pub type ManagedBrowser = Arc<BrowserManager<PlatformBrowserProvider>>;
 
-#[cfg(windows)]
+#[cfg_attr(not(windows), allow(dead_code))]
 static BROWSER_EVENT_PUMP_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Serialize)]
@@ -1196,7 +1196,8 @@ fn to_string(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
-#[cfg(windows)]
+// Only the native WebView2 provider schedules the pump.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn schedule_browser_event_pump(app: AppHandle<Wry>) {
     if BROWSER_EVENT_PUMP_SCHEDULED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

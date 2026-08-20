@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::ffi::OsStr;
 use std::{
     path::{Path, PathBuf},

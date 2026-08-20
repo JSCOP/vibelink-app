@@ -804,7 +804,7 @@ pub async fn open_capture_overlay(
 /// expressed as the monitor-local source rect and the destination offset inside
 /// the stitched output image.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), test))]
 struct MonitorCrop {
     src_x: u32,
     src_y: u32,
@@ -814,7 +814,7 @@ struct MonitorCrop {
     height: u32,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(any(not(target_os = "linux"), test))]
 fn monitor_crop(region: CaptureMonitorRect, monitor: CaptureMonitorRect) -> Option<MonitorCrop> {
     let left = (region.x as i64).max(monitor.x as i64);
     let top = (region.y as i64).max(monitor.y as i64);

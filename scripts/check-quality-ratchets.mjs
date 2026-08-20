@@ -51,7 +51,7 @@ const sourceBudgets = {
   'src-tauri/src/app/agent_hooks.rs': 2_652,
   'src-tauri/src/app/android_device_lab.rs': 1_680,
   // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
-  'src-tauri/src/app/browser.rs': 1_429,
+  'src-tauri/src/app/browser.rs': 1_430,
   'src-tauri/src/app/capture.rs': 1_435,
   'src-tauri/src/app/daemon_client.rs': 1_210,
   'src-tauri/src/app/fsops.rs': 1_704,
@@ -93,8 +93,10 @@ const sourceExclusions = [
 // sizes rounded up to the next KiB, so real growth still trips the gate.
 const bundleBudgets = [
   ['App', /^App-.*\.js$/, 487_424],
-  ['TerminalManager', /^TerminalManager-.*\.js$/, 610_304],
-  ['store', /^store-.*\.js$/, 399_360],
+  // 2026-08-20: remote SSH workspaces and terminal-hosted automation runs; measured 618668.
+  ['TerminalManager', /^TerminalManager-.*\.js$/, 619_520],
+  // 2026-08-20: same features add ssh target state and account config sync; measured 435580.
+  ['store', /^store-.*\.js$/, 436_224],
   ['Monaco', /^monaco-.*\.js$/, 1_285_120],
   ['TypeScript worker', /^ts\.worker-.*\.js$/, 6_916_096],
 ]

@@ -5,12 +5,11 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use std::{
     env,
     io::{Read, Write},
-    path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
 #[cfg(windows)]
-use std::{ffi::OsString, process::Command, sync::LazyLock};
+use std::{ffi::OsString, path::PathBuf, process::Command, sync::LazyLock};
 use uuid::Uuid;
 
 pub const DEFAULT_SCROLLBACK_CAP: usize = 8 * 1024 * 1024;

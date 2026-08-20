@@ -940,12 +940,12 @@ const ICON_128_PNG: &[u8] = include_bytes!("../../resources/browser-extension/ic
 /// The id the Chrome Web Store console assigns at the first draft upload. While
 /// it is `None`, `--install` only writes the unpacked bundle, exactly as before.
 const STORE_EXTENSION_ID: Option<&str> = None;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const STORE_UPDATE_URL: &str = "https://clients2.google.com/service/update2/crx";
 
 /// `(HKCU subkey path, value name, value)`, split out from the registry write so
 /// the key shape is testable without touching the registry.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn store_registration(extension_id: &str) -> (String, &'static str, &'static str) {
     (
         format!("Software\\Google\\Chrome\\Extensions\\{extension_id}"),

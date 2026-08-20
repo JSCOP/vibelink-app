@@ -1,7 +1,9 @@
 #[cfg(windows)]
 use anyhow::{anyhow, Context};
 use anyhow::{bail, Result};
-use std::{path::Path, time::Duration};
+use std::path::Path;
+#[cfg(windows)]
+use std::time::Duration;
 
 #[cfg(windows)]
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);

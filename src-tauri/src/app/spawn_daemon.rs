@@ -1022,7 +1022,7 @@ fn process_exists(pid: u32) -> Result<bool> {
     Ok(status.success())
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn termination_attempt_completed(
     command_succeeded: bool,
     process_exists_after_attempt: bool,
