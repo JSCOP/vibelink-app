@@ -67,7 +67,6 @@ zeroize = { version = "1", features = ["derive"] }
 url = "2"
 
 ureq = { version = "2", features = ["json"] }
-keyring = { version = "3", features = ["windows-native"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 cron = "0.17.0"
@@ -75,7 +74,12 @@ trash = "5"
 
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# The OS keyring backend is selected per target. keyring 3 falls back to an in-memory mock
+# credential when no platform feature is enabled, which would silently regenerate the daemon
+# IPC secret every process and the Remote v2 Noise identity every boot, so each supported
+# target must name its backend explicitly.
 [target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 webview2-com = "0.38.2"
 winreg = "0.55"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Credentials", "Win32_System_LibraryLoader", "Win32_System_RemoteDesktop", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
@@ -95,6 +99,20 @@ windows = { version = "=0.61.3", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Signals and process groups replace the Windows Job Object for child lifetime containment.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# linux-native-sync-persistent = keyutils cache in front of the Secret Service. A desktop with
+# a running Secret Service keeps secrets across reboots; a headless host without D-Bus degrades
+# to the kernel session keyring instead of failing outright. crypto-rust avoids an OpenSSL
+# build dependency on the runner.
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }
 
 # Release binary: thin LTO + single codegen unit measurably shrink and speed the 694-crate build output; strip removes symbols from the shipped exe.
 [profile.release]

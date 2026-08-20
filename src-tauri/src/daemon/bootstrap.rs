@@ -59,17 +59,16 @@ fn run_inner() -> Result<()> {
         paths.data_dir.join("automation-artifacts"),
         Arc::clone(&worktree_registry),
     )?);
-    let computer_host_executable = std::env::var_os("VIBELINK_COMPUTER_HOST_EXE")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe().ok().and_then(|path| {
-                path.parent()
-                    .map(|parent| parent.join("vibelink-computer-host.exe"))
-            })
-        })
-        .context("resolve computer-use host executable")?;
+    // The host binary is resolved, not required. A target that ships no sidecar still boots:
+    // the supervisor spawns lazily, so a missing executable surfaces as a typed
+    // `provider_unavailable` on the first computer-use request instead of aborting the daemon.
+    let computer_host_executable = match std::env::var_os("VIBELINK_COMPUTER_HOST_EXE") {
+        Some(value) => PathBuf::from(value),
+        None => crate::app::cli_path::computer_host_path()
+            .context("resolve computer-use host executable")?,
+    };
     let computer = start_computer_host(
-        WindowsProcessSpawner::new(paths.data_dir.join("computer-artifacts"), app_flavor),
+        platform_process_spawner(paths.data_dir.join("computer-artifacts"), app_flavor),
         computer_host_executable,
     )?;
     let remote = Arc::new(RemoteServer::new(paths.data_dir.clone())?);
@@ -404,10 +403,10 @@ fn start_remote_pane_lease_expiry_sweep(
     Ok(())
 }
 
-fn start_computer_host(
-    spawner: WindowsProcessSpawner,
-    executable_path: PathBuf,
-) -> Result<SharedComputerHost> {
+fn start_computer_host<S>(spawner: S, executable_path: PathBuf) -> Result<SharedComputerHost>
+where
+    S: ProviderProcessSpawner + Send + 'static,
+{
     let (tx, rx) = bounded::<ComputerHostCall>(64);
     thread::Builder::new()
         .name("vibelink-computer-host-owner".to_string())

@@ -14,7 +14,9 @@ mod precheck;
 pub mod process_registry;
 #[path = "automation/runner.rs"]
 pub mod runner;
-#[cfg(test)]
+// The runner behaviour suite drives PowerShell fixtures and Win32 process handles; a POSIX
+// equivalent lands with the POSIX acceptance run rather than being faked here.
+#[cfg(all(test, windows))]
 #[path = "automation/runner_behavior_tests.rs"]
 mod runner_behavior_tests;
 #[path = "automation/schedule.rs"]

@@ -19,7 +19,6 @@ anyhow = "1"
 base64 = "0.22"
 crossbeam-channel = "0.5"
 interprocess = "2"
-keyring = { version = "3", features = ["windows-native"] }
 local-ip-address = "0.6"
 rand = "0.8"
 rcgen = "0.13"
@@ -40,3 +39,14 @@ ureq = { version = "2", features = ["json"] }
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = { version = "1", features = ["derive"] }
+
+# Mirrors the desktop crate: keyring 3 silently falls back to an in-memory mock credential when
+# no platform backend feature is enabled, so every supported target names its own.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust"] }

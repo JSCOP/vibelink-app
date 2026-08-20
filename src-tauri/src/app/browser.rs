@@ -3,8 +3,8 @@ use crate::browser::{
     BrowserCookieImportInput, BrowserCookieImportResult, BrowserCookieImportSource,
     BrowserDeviceMetrics, BrowserDialogRequest, BrowserDownloadRecord, BrowserError,
     BrowserErrorCode, BrowserLifecycleEvent, BrowserManager, BrowserPage, BrowserProfile,
-    CertificateDecision, CertificateRequest, NativeBrowserProvider, PermissionDecision,
-    PermissionRequest, PhysicalBounds, ProfileKind,
+    CertificateDecision, CertificateRequest, PermissionDecision, PermissionRequest, PhysicalBounds,
+    PlatformBrowserProvider, ProfileKind,
 };
 use crate::dedicated_cli::browser_page::{
     BrowserJpegCaptureOptions, BrowserKeyInput as CdpKeyInput, BrowserPageScale,
@@ -34,7 +34,7 @@ use std::{
 use tauri::{AppHandle, Manager as _, State, Wry};
 use uuid::Uuid;
 
-pub type ManagedBrowser = Arc<BrowserManager<NativeBrowserProvider>>;
+pub type ManagedBrowser = Arc<BrowserManager<PlatformBrowserProvider>>;
 
 static BROWSER_EVENT_PUMP_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
@@ -1132,7 +1132,7 @@ where
 }
 
 fn browser_projection(
-    manager: &BrowserManager<NativeBrowserProvider>,
+    manager: &BrowserManager<PlatformBrowserProvider>,
     workspace_id: &str,
 ) -> Result<BrowserProjection, String> {
     let pages: Vec<BrowserPage> = manager

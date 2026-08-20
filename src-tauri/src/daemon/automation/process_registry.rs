@@ -1,9 +1,10 @@
 use super::model::AutomationRuntimeIdentity;
 use anyhow::{anyhow, Result};
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::{
     collections::HashMap,
     io,
-    os::windows::io::AsRawHandle,
     process::{Child, Command, ExitStatus},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -11,6 +12,7 @@ use std::{
     },
     thread,
 };
+#[cfg(windows)]
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -29,6 +31,9 @@ use windows::{
     },
 };
 
+// Only the Windows path waits on a handle after signalling; the POSIX path delivers SIGKILL
+// and lets `Completion` report the reaped status.
+#[cfg(windows)]
 const TERMINATE_WAIT_MS: u32 = 5_000;
 
 #[derive(Clone)]
@@ -56,9 +61,20 @@ pub struct RegisteredProcess {
     cancelled: Arc<AtomicBool>,
 }
 
+#[cfg(windows)]
 struct ProcessControl {
     process: OwnedHandle,
     job: OwnedHandle,
+}
+
+/// POSIX counterpart of the Windows process + job pair.
+///
+/// `process_group` is recorded only when the child provably leads its own group, so a signal can
+/// never escape to the daemon's group.
+#[cfg(unix)]
+struct ProcessControl {
+    pid: u32,
+    process_group: Option<i32>,
 }
 
 struct Completion {
@@ -79,8 +95,10 @@ struct WaitError {
     message: String,
 }
 
+#[cfg(windows)]
 struct OwnedHandle(HANDLE);
 
+#[cfg(windows)]
 // SAFETY: Windows kernel handles (`HANDLE`) are process-wide identifiers, not bound to the thread
 // that created them. `OwnedHandle` uniquely owns the underlying handle (and closes it on Drop),
 // and all operations using `OwnedHandle` are synchronized via external mutexes/ownership bounds,
@@ -98,6 +116,15 @@ impl AutomationProcessRegistry {
     }
 
     pub fn spawn(&self, run_id: &str, command: &mut Command) -> io::Result<RegisteredProcess> {
+        // POSIX has no Job Object. The equivalent containment is a process group the child leads,
+        // which `ProcessControl` can then signal as a unit. This must be requested before the
+        // fork, so `spawn` is the only place that can establish it; a child handed straight to
+        // `register` keeps whatever group it was born into and is signalled individually.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.process_group(0);
+        }
         let child = command.spawn()?;
         self.register(run_id, child)
     }
@@ -188,6 +215,7 @@ impl AutomationProcessRegistry {
     }
 }
 
+#[cfg(windows)]
 pub fn terminate_persisted_process(identity: &AutomationRuntimeIdentity) -> io::Result<bool> {
     let process = match open_exact_process(identity.pid, identity.process_start_time) {
         Ok(process) => process,
@@ -326,6 +354,7 @@ impl Drop for RegistryInner {
     }
 }
 
+#[cfg(windows)]
 impl ProcessControl {
     fn assign(child: &Child, expected_start_time: u64) -> io::Result<Self> {
         use std::{ffi::c_void, mem::size_of};
@@ -424,6 +453,7 @@ impl WaitOutcome {
     }
 }
 
+#[cfg(windows)]
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
         if !self.0.is_invalid() {
@@ -432,6 +462,7 @@ impl Drop for OwnedHandle {
     }
 }
 
+#[cfg(windows)]
 fn process_identity(child: &Child, generation: u64) -> io::Result<AutomationRuntimeIdentity> {
     Ok(AutomationRuntimeIdentity {
         pid: child.id(),
@@ -440,6 +471,7 @@ fn process_identity(child: &Child, generation: u64) -> io::Result<AutomationRunt
     })
 }
 
+#[cfg(windows)]
 fn open_exact_process(pid: u32, expected_start_time: u64) -> io::Result<OwnedHandle> {
     let process = OwnedHandle(
         unsafe {
@@ -460,6 +492,7 @@ fn open_exact_process(pid: u32, expected_start_time: u64) -> io::Result<OwnedHan
     Ok(process)
 }
 
+#[cfg(windows)]
 fn process_start_time(process: HANDLE) -> io::Result<u64> {
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
@@ -468,6 +501,115 @@ fn process_start_time(process: HANDLE) -> io::Result<u64> {
     unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }
         .map_err(windows_error)?;
     Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+#[cfg(unix)]
+impl ProcessControl {
+    fn assign(child: &Child, expected_start_time: u64) -> io::Result<Self> {
+        let pid = child.id();
+        if process_start_time(pid)? != expected_start_time {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "automation process identity changed before registration",
+            ));
+        }
+        // SAFETY: `getpgid` only reads scheduler metadata for `pid` and reports failure through
+        // `errno`; it mutates nothing in this process.
+        let group = unsafe { libc::getpgid(pid as libc::pid_t) };
+        let process_group = if group > 0 && group == pid as libc::pid_t {
+            Some(group)
+        } else {
+            None
+        };
+        Ok(Self { pid, process_group })
+    }
+
+    fn terminate_and_wait(&self) -> io::Result<()> {
+        // `TerminateJobObject` is an immediate, ungraceful stop of the whole tree, so the POSIX
+        // path matches it with `SIGKILL` rather than inventing a grace period the Windows path
+        // does not have. Reaping is the caller's job: `terminate_entry` blocks on `Completion`,
+        // which the waiter thread finishes once `Child::wait` returns.
+        // SAFETY: both calls only deliver a signal to a target this registry owns - either the
+        // child itself, or a process group the child provably leads.
+        let result = match self.process_group {
+            Some(group) => unsafe { libc::killpg(group, libc::SIGKILL) },
+            None => unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) },
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        // The process already exited; the waiter thread still reports its status.
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+fn process_identity(child: &Child, generation: u64) -> io::Result<AutomationRuntimeIdentity> {
+    Ok(AutomationRuntimeIdentity {
+        pid: child.id(),
+        process_start_time: process_start_time(child.id())?,
+        generation,
+    })
+}
+
+/// Seconds since the epoch at which `pid` started.
+///
+/// Windows records a 100-nanosecond `FILETIME`; POSIX only needs a value that is stable for the
+/// lifetime of the process and differs after a PID is reused, which second resolution provides in
+/// combination with the PID itself.
+#[cfg(unix)]
+fn process_start_time(pid: u32) -> io::Result<u64> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let target = Pid::from_u32(pid);
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[target]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system
+        .process(target)
+        .map(|process| process.start_time())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("automation process {pid} is not running"),
+            )
+        })
+}
+
+#[cfg(unix)]
+pub fn terminate_persisted_process(identity: &AutomationRuntimeIdentity) -> io::Result<bool> {
+    // A process recorded by an earlier daemon run is not a child of this one, so there is nothing
+    // to reap and the PID must be re-identified before it is signalled.
+    match process_start_time(identity.pid) {
+        Ok(start_time) if start_time == identity.process_start_time => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    }
+    // SAFETY: `getpgid` reads scheduler metadata for `pid` and mutates nothing.
+    let group = unsafe { libc::getpgid(identity.pid as libc::pid_t) };
+    let signalled = if group > 0 && group == identity.pid as libc::pid_t {
+        // SAFETY: the recorded process leads this group, so the signal cannot reach the daemon.
+        unsafe { libc::killpg(group, libc::SIGKILL) }
+    } else {
+        // SAFETY: delivers a signal to the exact PID whose start time was just verified.
+        unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) }
+    };
+    if signalled == 0 {
+        return Ok(true);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(false);
+    }
+    Err(error)
 }
 
 fn spawn_waiter(mut child: Child, completion: Arc<Completion>) -> io::Result<()> {
@@ -508,6 +650,7 @@ fn terminate_unregistered(child: &mut Child) {
     let _ = child.wait();
 }
 
+#[cfg(windows)]
 fn windows_error(error: windows::core::Error) -> io::Error {
     io::Error::other(error.to_string())
 }
@@ -518,7 +661,7 @@ fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
     use std::{

@@ -1,4 +1,7 @@
-use anyhow::{anyhow, Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::{anyhow, Result};
+#[cfg(windows)]
 use std::process::Command;
 
 const RELEASE_RULE_NAME: &str = "VibeLink Remote Access";
@@ -26,6 +29,7 @@ pub fn validate_port(port: u16) -> Result<u16> {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[cfg(windows)]
 fn powershell() -> Command {
     let mut command = Command::new("powershell");
     command.args(["-NoProfile", "-NonInteractive"]);
@@ -37,6 +41,7 @@ fn powershell() -> Command {
     command
 }
 
+#[cfg(windows)]
 fn encoded_command(script: &str) -> String {
     use base64::Engine;
     let utf16: Vec<u8> = script
@@ -49,26 +54,31 @@ fn encoded_command(script: &str) -> String {
 // Windows categorises most wired/home networks as `Public`, so a `Private`-only rule silently
 // blocks phone pairing. Allow every profile but keep the port off the public internet by scoping
 // it to private LAN ranges plus the Tailscale CGNAT range.
+#[cfg(windows)]
 const RULE_SCOPE: &str = "LocalSubnet,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10";
 
+#[cfg(windows)]
 fn configured_ports_script(rule_name: &str) -> String {
     format!(
         "$ErrorActionPreference = 'Stop'; Get-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue | Where-Object {{ $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and $_.Profile -eq 'Any' }} | Get-NetFirewallPortFilter | Where-Object {{ $_.Protocol -eq 'TCP' }} | ForEach-Object {{ $_.LocalPort }}"
     )
 }
 
+#[cfg(windows)]
 fn setup_script(rule_name: &str, port: u16) -> String {
     format!(
         "$ErrorActionPreference = 'Stop'\ntry {{\n  Remove-NetFirewallRule -DisplayName '{rule_name}' -ErrorAction SilentlyContinue\n  New-NetFirewallRule -DisplayName '{rule_name}' -Direction Inbound -Action Allow -Protocol TCP -LocalPort {port} -Profile Any -RemoteAddress {RULE_SCOPE} | Out-Null\n  exit 0\n}} catch {{ exit 1 }}"
     )
 }
 
+#[cfg(windows)]
 fn elevation_script(encoded: &str) -> String {
     format!(
         "$ErrorActionPreference = 'Stop'; try {{ $process = Start-Process -FilePath 'powershell' -ArgumentList @('-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand','{encoded}') -Verb RunAs -Wait -PassThru; exit $process.ExitCode }} catch {{ exit 1 }}"
     )
 }
 
+#[cfg(windows)]
 /// Ports currently allowed by enabled inbound TCP rules with our display name.
 pub fn configured_ports() -> Result<Vec<u16>> {
     let query = configured_ports_script(rule_name());
@@ -82,11 +92,13 @@ pub fn configured_ports() -> Result<Vec<u16>> {
     Ok(parse_ports(&String::from_utf8_lossy(&output.stdout)))
 }
 
+#[cfg(windows)]
 pub fn is_configured(port: u16) -> Result<bool> {
     let port = validate_port(port)?;
     Ok(configured_ports()?.contains(&port))
 }
 
+#[cfg(windows)]
 /// Replaces the VibeLink inbound allow rule with one for `port`.
 /// Triggers a single UAC elevation prompt; fails when the user declines.
 pub fn setup(port: u16) -> Result<()> {
@@ -106,10 +118,30 @@ pub fn setup(port: u16) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 fn parse_ports(text: &str) -> Vec<u16> {
     text.lines()
         .filter_map(|line| line.trim().parse::<u16>().ok())
         .collect()
+}
+
+// VibeLink manages a host firewall rule only on Windows, where an inbound rule plus a UAC
+// elevation is required before a phone on the LAN can reach the remote server. POSIX hosts
+// have no equivalent rule this process owns: binding a non-privileged port needs no
+// permission, and ufw/firewalld/pf are optional, site-specific, and administered outside the
+// application. Reporting "configured" here means "there is nothing for VibeLink to confirm",
+// which keeps `RemoteServer::start` from refusing LAN mode on those platforms.
+
+#[cfg(not(windows))]
+pub fn is_configured(port: u16) -> Result<bool> {
+    validate_port(port)?;
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+pub fn setup(port: u16) -> Result<()> {
+    validate_port(port)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -123,6 +155,7 @@ mod tests {
         assert_eq!(rule_name(), rule_name_for(cfg!(debug_assertions)));
     }
 
+    #[cfg(windows)]
     #[test]
     fn status_query_requires_all_profile_inbound_tcp_allow_rule() {
         let query = configured_ports_script(DEBUG_RULE_NAME);
@@ -136,6 +169,7 @@ mod tests {
         assert!(query.contains("$_.Protocol -eq 'TCP'"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn setup_replaces_only_the_flavor_rule_with_a_scoped_all_profile_port_rule() {
         let script = setup_script(RELEASE_RULE_NAME, 42_811);
@@ -156,6 +190,7 @@ mod tests {
         assert_eq!(validate_port(u16::MAX).unwrap(), u16::MAX);
     }
 
+    #[cfg(windows)]
     #[test]
     fn parses_only_numeric_port_lines() {
         assert_eq!(parse_ports("42811\r\nAny\r\n\r\n"), vec![42811]);
@@ -163,6 +198,7 @@ mod tests {
         assert_eq!(parse_ports("42811\n50000\n"), vec![42811, 50000]);
     }
 
+    #[cfg(windows)]
     #[test]
     fn encoded_command_is_utf16le_base64() {
         assert_eq!(encoded_command("exit 0"), "ZQB4AGkAdAAgADAA");

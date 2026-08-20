@@ -83,9 +83,10 @@ use crate::app::{
     spawn_daemon::load_or_create_ipc_secret,
 };
 use crate::computer_use::{
-    ActionRequest, ActionTarget, ApprovalRequest, ComputerAction as ProviderComputerAction,
-    HostRequest, HostResponseBody, Point, ProviderError, ProviderHostSupervisor, SnapshotLimits,
-    SnapshotRequest, WindowIdentity, WindowsProcessSpawner,
+    platform_process_spawner, ActionRequest, ActionTarget, ApprovalRequest,
+    ComputerAction as ProviderComputerAction, HostRequest, HostResponseBody, Point, ProviderError,
+    ProviderHostSupervisor, ProviderProcessSpawner, SnapshotLimits, SnapshotRequest,
+    WindowIdentity,
 };
 use crate::control_plane::{ControlCommand, ControlPlane};
 use crate::daemon::automation::{

@@ -36,12 +36,43 @@ mod webview_renderer;
 mod window_chrome;
 
 use crate::{
-    browser::{BrowserManager, BrowserPolicy, NativeBrowserProvider},
+    browser::{BrowserManager, BrowserPolicy, PlatformBrowserProvider},
     runtime_ports,
 };
 use daemon_client::DaemonClient;
 use std::sync::Arc;
 use tauri::Manager;
+
+/// Builds the `BrowserProvider` this target drives child pages with.
+///
+/// The native provider hosts WebView2 child controls on the main window's HWND, so it exists
+/// only on Windows. Other targets manage the unsupported provider instead of leaving browser
+/// state unmanaged, because `ManagedBrowser` is retrieved with `State`/`state()` and those
+/// panic when the type was never managed.
+#[cfg(windows)]
+fn platform_browser_provider(
+    app: &tauri::AppHandle,
+    registry_path: std::path::PathBuf,
+    main_cdp_port: u16,
+) -> Arc<PlatformBrowserProvider> {
+    let event_pump_app = app.clone();
+    Arc::new(PlatformBrowserProvider::new(
+        app.clone(),
+        "main",
+        registry_path,
+        main_cdp_port,
+        move || browser::schedule_browser_event_pump(event_pump_app.clone()),
+    ))
+}
+
+#[cfg(not(windows))]
+fn platform_browser_provider(
+    _app: &tauri::AppHandle,
+    _registry_path: std::path::PathBuf,
+    _main_cdp_port: u16,
+) -> Arc<PlatformBrowserProvider> {
+    Arc::new(PlatformBrowserProvider)
+}
 
 /// Exit policy shared with the frontend `settings.sessionRestore`.
 ///
@@ -167,14 +198,11 @@ pub fn run() {
                 .ok()
                 .and_then(|value| value.parse::<u16>().ok())
                 .unwrap_or(9333);
-            let browser_event_app = app.handle().clone();
-            let browser_provider = Arc::new(NativeBrowserProvider::new(
-                app.handle().clone(),
-                "main",
+            let browser_provider = platform_browser_provider(
+                app.handle(),
                 browser_root.join("cdp-registry.json"),
                 browser_cdp_port,
-                move || browser::schedule_browser_event_pump(browser_event_app.clone()),
-            ));
+            );
             app.manage(Arc::new(BrowserManager::new(
                 browser_provider,
                 browser_policy,

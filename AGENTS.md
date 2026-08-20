@@ -9,10 +9,23 @@ canonical UI and domain vocabulary, and `CONTRIBUTING.md` for toolchain and PR r
 
 ## Windows only
 
-The product does not build on macOS or Linux. Win32 UI Automation, ConPTY, Job Objects,
-HWND subclassing, the Windows Credential Manager backend, and the PowerShell build scripts
-are load-bearing, not incidental. Do not "fix" a compile error by stubbing a Windows API;
-cross-platform support is a separate, unstarted project.
+VibeLink ships for Windows. Win32 UI Automation, ConPTY, Job Objects, HWND subclassing, the
+Windows Credential Manager backend, and the PowerShell build scripts are load-bearing, not
+incidental. There is no macOS or Linux build, installer, or support claim.
+
+A compile-only gate for Linux and macOS runs in CI so that platform-specific code stays behind
+an explicit seam instead of leaking into shared startup paths. Working inside that gate:
+
+- Keep Windows behaviour byte-identical. A seam must resolve to the existing Windows type or
+  call on Windows, not to a new abstraction Windows also has to travel through.
+- Where a target has no implementation, return a structured unsupported error
+  (`UnsupportedBrowserProvider`, `UnsupportedProcessSpawner`) instead of a stub that pretends to
+  work. A stub that silently succeeds is worse than a compile error; a typed failure is better
+  than both.
+- Gate with `#[cfg(windows)]` / `#[cfg(unix)]`. `#[cfg(target_os = "windows")]` is not used in
+  this tree; do not introduce it.
+- Process cleanup has no portable shortcut. The Windows Job Object is matched by a POSIX process
+  group the child leads, never by signalling a group this process did not create.
 
 ## Use the glossary
 
