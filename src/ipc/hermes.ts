@@ -275,14 +275,33 @@ export async function loadAgentChatHistory(sessionId: string): Promise<AgentChat
   if (!latest) return null
   const store = useWorkspaceStore.getState()
   store.setHermesChatId(sessionId, latest.chatId)
-  const page = await invoke<{ entries: AgentTimelineRow[]; lastSeq: number }>('agent_chat_timeline', {
-    sessionId,
-    chatId: latest.chatId,
-    afterSeq: 0,
-    limit: 500,
-  }).catch(() => null)
-  if (page && page.entries.length > 0) {
-    store.hydrateHermesTranscript(sessionId, turnsFromTimeline(page.entries))
+  // Page to the TAIL: a single first-page fetch would show a long chat's
+  // oldest rows and hide the newest replies and permission prompts.
+  const pageLimit = 500
+  const keepRecent = 1_000
+  let cursor = 0
+  let rows: AgentTimelineRow[] = []
+  for (let iteration = 0; iteration < 8; iteration += 1) {
+    const page = await invoke<{ entries: AgentTimelineRow[]; lastSeq: number }>('agent_chat_timeline', {
+      sessionId,
+      chatId: latest.chatId,
+      afterSeq: cursor,
+      limit: pageLimit,
+    }).catch(() => null)
+    if (!page) break
+    if (iteration === 0 && page.lastSeq - cursor > keepRecent) {
+      // Ancient history stays fetchable later; the cold-start paint only
+      // needs the recent window.
+      cursor = page.lastSeq - keepRecent
+      continue
+    }
+    rows = rows.concat(page.entries)
+    const tail = rows.length > 0 ? rows[rows.length - 1].seq : cursor
+    if (page.entries.length < pageLimit || tail >= page.lastSeq) break
+    cursor = tail
+  }
+  if (rows.length > 0) {
+    store.hydrateHermesTranscript(sessionId, turnsFromTimeline(rows))
     if (latest.acpSessionId) store.setHermesCurrentSession(sessionId, latest.acpSessionId)
   }
   return latest

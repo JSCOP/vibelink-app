@@ -1,5 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
+#[path = "../src/agent_timeline.rs"]
+mod agent_timeline;
 #[path = "../src/browser/mod.rs"]
 mod browser;
 #[path = "../src/control_plane.rs"]

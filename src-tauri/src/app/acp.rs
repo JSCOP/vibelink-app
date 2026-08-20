@@ -100,7 +100,9 @@ fn resolve_claude_code_acp(command_override: Option<String>) -> Result<(String, 
         npx,
         vec![
             "-y".to_string(),
-            "@zed-industries/claude-code-acp".to_string(),
+            // Pinned: an unpinned npx fallback would execute whatever the registry
+            // serves tomorrow. Bump deliberately alongside adapter testing.
+            "@zed-industries/claude-code-acp@0.16.2".to_string(),
         ],
     ))
 }

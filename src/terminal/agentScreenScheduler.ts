@@ -11,11 +11,15 @@ import { agentKindForPane } from '../state/profiles'
 import { useWorkspaceStore } from '../state/store'
 
 const DETECT_DEBOUNCE_MS = 400
+/** A pure debounce starves under sustained output (a build spamming stdout
+ *  resets the timer forever); force an evaluation at least this often. */
+const DETECT_MAX_WAIT_MS = 1_500
 const SCREEN_LINES = 40
 
 type ReadScreen = (paneId: string, maxLines: number) => string
 
 const timers = new Map<string, number>()
+const firstScheduledAt = new Map<string, number>()
 const lastTitles = new Map<string, string>()
 const lastReported = new Map<string, string | null>()
 let readScreen: ReadScreen | null = null
@@ -41,12 +45,17 @@ export function initAgentScreenDetection(reader: ReadScreen): void {
 /** Cheap to call per output frame; work happens once per quiet window. */
 export function scheduleAgentScreenDetection(paneId: string): void {
   if (!readScreen) return
+  const now = Date.now()
+  const first = firstScheduledAt.get(paneId) ?? now
+  firstScheduledAt.set(paneId, first)
   const existing = timers.get(paneId)
   if (existing !== undefined) window.clearTimeout(existing)
+  const delay = Math.max(0, Math.min(DETECT_DEBOUNCE_MS, first + DETECT_MAX_WAIT_MS - now))
   timers.set(paneId, window.setTimeout(() => {
     timers.delete(paneId)
+    firstScheduledAt.delete(paneId)
     evaluate(paneId)
-  }, DETECT_DEBOUNCE_MS))
+  }, delay))
 }
 
 export function noteAgentScreenTitle(paneId: string, title: string): void {
@@ -58,6 +67,7 @@ export function clearAgentScreenDetection(paneId: string): void {
   const existing = timers.get(paneId)
   if (existing !== undefined) window.clearTimeout(existing)
   timers.delete(paneId)
+  firstScheduledAt.delete(paneId)
   lastTitles.delete(paneId)
   useWorkspaceStore.getState().setPaneScreenState(paneId, null)
   reportToDaemon(paneId, null)

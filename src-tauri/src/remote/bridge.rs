@@ -2586,22 +2586,32 @@ fn handle_v2_request(
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
+            // Match the desktop's own spawn defaults (state/store.ts): start in
+            // the workspace folder, survive a cold daemon restart, and carry the
+            // CLI scope env so agents inside the pane can use `vibelink`.
+            let workspace_folder = list_sessions(daemon_writer, daemon_inbox, next_req)?
+                .into_iter()
+                .find(|session| session.id == workspace_id)
+                .and_then(|session| session.workspace_folder);
+            let pane_id = Uuid::new_v4();
             let cfg = crate::protocol::PaneConfig {
-                pane_id: Uuid::new_v4(),
+                pane_id,
                 // None lets the daemon pick its resolved default shell (pwsh).
                 shell: None,
                 args: Vec::new(),
-                cwd: None,
-                env: Vec::new(),
+                cwd: workspace_folder,
+                env: vec![
+                    ("VIBELINK_SESSION_ID".to_string(), workspace_id.to_string()),
+                    ("VIBELINK_PANE_ID".to_string(), pane_id.to_string()),
+                ],
                 title,
                 icon: None,
                 profile_id: None,
                 role: None,
-                restore_on_start: false,
+                restore_on_start: true,
                 cols: 120,
-                rows: 30,
+                rows: 32,
             };
-            let pane_id = cfg.pane_id;
             let req = take_req(next_req);
             match request_reply(
                 daemon_writer,

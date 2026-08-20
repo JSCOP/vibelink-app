@@ -44,4 +44,4 @@ The Hermes brand icon used by VibeLink is listed separately in `public/agent-ico
 - **Component:** screen-content agent state detection rules and engine design, ported to TypeScript in `src/terminal/agentScreenDetect.ts`
 - **Source:** https://github.com/herdrdev/herdr (`src/detect/`)
 - **Copyright holder:** the herdr contributors
-- **License:** Apache License 2.0
+- **License:** Apache License 2.0 — full text in [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt)

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+#[path = "../src/agent_timeline.rs"]
+mod agent_timeline;
 #[path = "../src/control_plane.rs"]
 mod control_plane;
 #[path = "../src/daemon/paths.rs"]
