@@ -32,6 +32,7 @@ tauri = { version = "=2.11.3", features = ["unstable", "tray-icon", "image-png"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+toml = "0.8"
 rmp-serde = "1"
 serde_bytes = "0.11"
 portable-pty = "0.9"

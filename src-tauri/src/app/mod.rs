@@ -14,6 +14,7 @@ pub mod cli;
 pub mod cli_path;
 pub mod commands;
 pub mod computer_use;
+pub mod config_sync;
 pub mod daemon_client;
 pub mod diagnostics;
 pub mod fsops;
@@ -302,6 +303,11 @@ pub fn run() {
             hermes::hermes_workspace_state,
             acp::agent_workspace_cleanup,
             hermes::hermes_runtime_status,
+            config_sync::config_sync_status,
+            config_sync::config_sync_push,
+            config_sync::config_sync_pull,
+            config_sync::config_sync_set_var,
+            config_sync::config_sync_set_pins,
             account::account_status,
             account::account_sign_in_start,
             account::account_sign_in_poll,

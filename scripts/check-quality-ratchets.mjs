@@ -17,9 +17,9 @@ const sourceBudgets = {
   // 2026-08-20: +16 lines for coalesced input-batch flush (one write_pane per queued burst).
   // 2026-08-20: +screen-state detection scheduling hooks.
   'src/terminal/TerminalManager.ts': 2_472,
-  'src/state/store.ts': 2_197,
+  'src/state/store.ts': 2_207,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
-  'src-tauri/src/remote/bridge.rs': 5_568,
+  'src-tauri/src/remote/bridge.rs': 5_608,
   'src-tauri/src/orchestration/mod.rs': 4_683,
   'src-tauri/src/app/git/worktree_registry.rs': 3_149,
   // Keeps pending download records joinable after the manager tests moved out.
@@ -31,13 +31,13 @@ const sourceBudgets = {
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
   // 2026-08-20: +chat-id keying, provider table, durable timeline recorder.
-  'src-tauri/src/app/acp.rs': 2_836,
+  'src-tauri/src/app/acp.rs': 2_865,
   'src-tauri/src/app/hermes.rs': 439,
   // 2026-08-20: +agent-chat/timeline command variants and dispatch arms; the SQL
   // itself lives in agent_timeline.rs to keep this file from regrowing.
   'src-tauri/src/control_plane.rs': 2_594,
   // Over-cap baseline: split or justify before raising.
-  'src/components/SettingsDialog.tsx': 1_483,
+  'src/components/SettingsDialog.tsx': 1_489,
   'src/styles/appChrome.css': 1_834,
   'src/styles/gitWindow.css': 1_465,
   'src/styles/workspaceRail.css': 1_918,

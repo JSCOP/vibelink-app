@@ -72,6 +72,7 @@ import {
   X,
 } from 'lucide-react'
 import { AccountSettings } from './AccountSettings'
+import { ConfigSyncSettings } from './ConfigSyncSettings'
 import { RemoteSettings } from './RemoteSettings'
 import { ProfileIcon } from './ProfileIcon'
 import { defaultKeybindings, eventToKeyChord, keybindingDefinitions, type KeybindingActionId } from '../state/keybindings'
@@ -661,6 +662,12 @@ export function SettingsDialog({ settings, onChange, onClose, onRunSetupWizard, 
             {activeSection === 'account' ? (
               <SettingsSearchTarget labels={['Sign in / account status', 'Bug reports']}>
                 <AccountSettings />
+              </SettingsSearchTarget>
+            ) : null}
+
+            {activeSection === 'account' ? (
+              <SettingsSearchTarget labels={['Config sync']}>
+                <ConfigSyncSettings />
               </SettingsSearchTarget>
             ) : null}
 

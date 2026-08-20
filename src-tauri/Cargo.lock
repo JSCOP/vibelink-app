@@ -136,6 +136,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "thiserror 1.0.69",
  "time",
+ "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "trash",

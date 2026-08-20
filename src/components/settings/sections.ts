@@ -71,7 +71,7 @@ export const settingsSectionGroups: SettingsSectionGroup[] = [
     id: 'you',
     label: 'You',
     sections: [
-      { id: 'account', label: 'Account', icon: CircleUser, keywords: 'moobang license plan trial device sign in' },
+      { id: 'account', label: 'Account', icon: CircleUser, keywords: 'moobang license plan trial device sign in config sync 설정 동기화' },
       { id: 'appearance', label: 'Appearance', icon: Palette, keywords: 'theme font color cursor editor ui scale' },
       { id: 'notifications', label: 'Notifications', icon: Bell, keywords: 'sound alert completion volume hook' },
     ],

@@ -218,6 +218,15 @@ impl AccountService {
         Ok(AccountStatusDto::default())
     }
 
+    /// Bearer token for account-scoped API calls (config sync). None when the
+    /// user has not signed in on this machine.
+    pub fn session_token(&self) -> Result<Option<String>> {
+        Ok(self
+            .read_cache()?
+            .map(|stored| stored.session_token)
+            .filter(|token| !token.is_empty()))
+    }
+
     pub fn submit_bug_report(&self, input: BugReportInputDto) -> Result<BugReportCreatedDto> {
         let report = normalize_bug_report(input)?;
         let stored = self
