@@ -219,13 +219,17 @@ pub fn tree_metrics(sys: &System, root: u32) -> (u64, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{child_map, descendant_pids, kill_process_tree};
+    use super::descendant_pids;
+    #[cfg(windows)]
+    use super::{child_map, kill_process_tree};
+    use std::collections::{HashMap, HashSet};
+    #[cfg(windows)]
     use std::{
-        collections::{HashMap, HashSet},
         process::Command,
         thread,
         time::{Duration, Instant},
     };
+    #[cfg(windows)]
     use sysinfo::{Pid, ProcessesToUpdate, System};
 
     #[test]

@@ -68,7 +68,10 @@ test('loads history lazily on sidebar activation and paginates with the current 
   renderHistory()
   expect(await screen.findByText('Initial commit')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Load more' }))
-  await waitFor(() => expect(invoke).toHaveBeenLastCalledWith('git_log', { workspaceFolder: 'C:/repo', options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null } }))
+  // Not toHaveBeenLastCalledWith: the panel also polls git_repo_info/git_working_status, and on a
+  // loaded machine a poll can land after the pagination request. No other call carries these
+  // arguments, so asserting the call happened is the same check without the ordering race.
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('git_log', { workspaceFolder: 'C:/repo', options: { refName: null, path: null, skip: 1, limit: 200, search: null, author: null } }))
 })
 
 test('refreshes active history when polling observes a new HEAD commit', async () => {

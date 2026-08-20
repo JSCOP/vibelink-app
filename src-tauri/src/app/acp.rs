@@ -2355,6 +2355,9 @@ pub(crate) fn non_empty_str(value: &str) -> Option<&str> {
 pub(crate) fn apply_no_window(command: &mut Command) {
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    // Nothing to suppress where there is no console window to create.
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 pub(crate) fn to_string(err: impl std::fmt::Display) -> String {

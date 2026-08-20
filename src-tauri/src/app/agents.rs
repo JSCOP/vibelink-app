@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
+#[cfg(windows)]
+use std::ffi::OsStr;
 use std::{
-    ffi::OsStr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},

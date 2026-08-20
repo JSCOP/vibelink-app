@@ -1,16 +1,18 @@
+#[cfg(windows)]
+use super::types::{BrowserDialogKind, BrowserLifecycleEventKind};
 use super::{
     error::{BrowserError, BrowserErrorCode, BrowserResult},
     types::{
         BrowserCookieImportInput, BrowserCookieImportResult, BrowserCookieImportSource,
-        BrowserDeviceMetrics, BrowserDialogKind, BrowserFrame, BrowserLifecycleEvent,
-        BrowserLifecycleEventKind, CertificateDecision, ChildWebViewCreate, ChildWebViewState,
-        PermissionDecision, PhysicalBounds,
+        BrowserDeviceMetrics, BrowserFrame, BrowserLifecycleEvent, CertificateDecision,
+        ChildWebViewCreate, ChildWebViewState, PermissionDecision, PhysicalBounds,
     },
 };
 use crate::dedicated_cli::browser_page::{
     BrowserInspectSnapshot, BrowserJpegCaptureOptions, BrowserJpegFrame, BrowserKeyInput,
     BrowserPageScale, BrowserPointerInput,
 };
+#[cfg(windows)]
 use crate::runtime_ports::browser_profile_port_candidates;
 
 #[cfg(windows)]

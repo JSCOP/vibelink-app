@@ -23,16 +23,19 @@ const sourceBudgets = {
   'src-tauri/src/orchestration/mod.rs': 4_683,
   'src-tauri/src/app/git/worktree_registry.rs': 3_149,
   // Keeps pending download records joinable after the manager tests moved out.
-  'src-tauri/src/browser/manager.rs': 3_147,
+  // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
+  'src-tauri/src/browser/manager.rs': 3_149,
   // Rebasing a pane's scrollback onto a GUI-rendered snapshot.
   // 2026-08-20: +screen-state overlay (herdr-style GUI detection merged into attention).
   'src-tauri/src/daemon/session.rs': 3_120,
-  'src-tauri/src/browser/provider.rs': 2_834,
+  // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
+  'src-tauri/src/browser/provider.rs': 2_836,
   // 2026-08-20: hermes.rs split - the provider-agnostic ACP chat runtime moved to
   // acp.rs (runtime + its test suite); hermes.rs keeps only Hermes-specific glue.
   // 2026-08-20: +chat-id keying, provider table, durable timeline recorder.
   // 2026-08-20: +1 for the clippy::type_complexity allow that restores the -D warnings gate.
-  'src-tauri/src/app/acp.rs': 2_866,
+  // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
+  'src-tauri/src/app/acp.rs': 2_869,
   'src-tauri/src/app/hermes.rs': 439,
   // 2026-08-20: +agent-chat/timeline command variants and dispatch arms; the SQL
   // itself lives in agent_timeline.rs to keep this file from regrowing.
@@ -47,7 +50,8 @@ const sourceBudgets = {
   'src/state/store.test.ts': 1_446,
   'src-tauri/src/app/agent_hooks.rs': 2_652,
   'src-tauri/src/app/android_device_lab.rs': 1_680,
-  'src-tauri/src/app/browser.rs': 1_427,
+  // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
+  'src-tauri/src/app/browser.rs': 1_429,
   'src-tauri/src/app/capture.rs': 1_435,
   'src-tauri/src/app/daemon_client.rs': 1_210,
   'src-tauri/src/app/fsops.rs': 1_704,

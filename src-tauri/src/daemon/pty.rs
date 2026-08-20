@@ -4,13 +4,13 @@ use anyhow::{Context, Result};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use std::{
     env,
-    ffi::OsString,
     io::{Read, Write},
     path::PathBuf,
-    process::Command,
-    sync::{Arc, LazyLock, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(windows)]
+use std::{ffi::OsString, process::Command, sync::LazyLock};
 use uuid::Uuid;
 
 pub const DEFAULT_SCROLLBACK_CAP: usize = 8 * 1024 * 1024;
@@ -740,11 +740,6 @@ fn expand_env_vars(value: &str) -> String {
     }
     expanded.push_str(rest);
     expanded
-}
-
-#[cfg(not(windows))]
-fn program_on_path(_program: &str) -> Option<PathBuf> {
-    None
 }
 
 #[cfg(test)]

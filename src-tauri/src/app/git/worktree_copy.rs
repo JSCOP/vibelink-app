@@ -20,6 +20,8 @@ pub(crate) fn validate_linked_file_paths(paths: &[String]) -> Result<Vec<PathBuf
     let mut validated = Vec::with_capacity(paths.len());
     for path in paths {
         let relative = validate_relative_file_path(path)?;
+        // Only the case-insensitive Windows branch mutates the key.
+        #[allow(unused_mut)]
         let mut key = relative.to_string_lossy().replace('\\', "/");
         #[cfg(windows)]
         key.make_ascii_lowercase();

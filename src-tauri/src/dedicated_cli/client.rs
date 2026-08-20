@@ -9,7 +9,9 @@ use interprocess::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{env, process::Command as ProcessCommand, sync::mpsc, thread, time::Duration};
+#[cfg(windows)]
+use std::process::Command as ProcessCommand;
+use std::{env, sync::mpsc, thread, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

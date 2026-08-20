@@ -2,6 +2,8 @@ use super::chrome_profile_windows;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -9,7 +11,6 @@ use std::{
     io::{Read, Seek},
     net::TcpListener,
     path::{Component, Path, PathBuf},
-    process::Command,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };

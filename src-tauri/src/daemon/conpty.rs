@@ -1,8 +1,12 @@
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 const CONPTY_DLL: &str = "conpty.dll";
+#[cfg(windows)]
 const OPEN_CONSOLE_EXE: &str = "OpenConsole.exe";
 
+#[cfg(windows)]
 fn resolve_bundle_dir<I>(candidates: I) -> Option<PathBuf>
 where
     I: IntoIterator<Item = PathBuf>,

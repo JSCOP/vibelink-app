@@ -1,6 +1,9 @@
-use anyhow::{anyhow, bail, Context, Result};
+#[cfg(windows)]
+use anyhow::{anyhow, Context};
+use anyhow::{bail, Result};
 use std::{path::Path, time::Duration};
 
+#[cfg(windows)]
 const PROCESS_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(windows)]
@@ -41,6 +44,7 @@ pub(super) struct LaunchedChrome {
     process: Option<OwnedHandle>,
     #[cfg(windows)]
     job: Option<OwnedHandle>,
+    #[cfg(windows)]
     profile_id: String,
     pid: u32,
 }

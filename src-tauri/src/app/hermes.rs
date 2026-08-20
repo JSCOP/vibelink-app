@@ -213,6 +213,8 @@ fn read_workspace_config_doc(config_path: &Path) -> Result<serde_yaml::Mapping> 
 }
 
 fn installer_acp_candidates() -> Vec<PathBuf> {
+    // Only the Windows branch below pushes into this.
+    #[allow(unused_mut)]
     let mut candidates = Vec::new();
     #[cfg(windows)]
     {

@@ -1348,6 +1348,9 @@ fn open_in_editor_native(root: &str, rel_path: &str, editor_command: &str) -> Re
     };
     #[cfg(windows)]
     let program = resolve_windows_launcher(program);
+    // `program` is read again below, and on Windows it is an owned launcher path, so the borrow is
+    // required there and merely redundant elsewhere.
+    #[cfg_attr(not(windows), allow(clippy::needless_borrows_for_generic_args))]
     Command::new(&program)
         .args(parts)
         .arg(&path)

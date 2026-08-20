@@ -1,11 +1,12 @@
 use anyhow::{anyhow, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::process::Command;
 use std::{
     env, fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 pub(crate) const PROD_APP_NAME: &str = "VibeLink";

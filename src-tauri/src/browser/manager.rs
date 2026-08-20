@@ -18,10 +18,12 @@ use crate::dedicated_cli::browser_page::{
     BrowserPageScale, BrowserPointerInput,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use std::io::Read;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},

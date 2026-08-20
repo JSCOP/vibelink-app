@@ -13,6 +13,7 @@
 //! because the page is untrusted.
 
 /// Install the overlay, hover highlight, and click handler.
+#[cfg(windows)]
 pub const ARM_SCRIPT: &str = r#"(() => {
 'use strict';
 if (window.__vibelinkDesignGrab) return;
@@ -435,6 +436,7 @@ window.__vibelinkDesignGrab = { teardown: teardown };
 })()"#;
 
 /// Remove the overlay and every listener the arm script installed.
+#[cfg(windows)]
 pub const TEARDOWN_SCRIPT: &str = r#"(() => {
 var grab = window.__vibelinkDesignGrab;
 if (grab && typeof grab.teardown === 'function') grab.teardown();
