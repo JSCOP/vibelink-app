@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useCallback, useContext, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeft,
@@ -15,9 +15,13 @@ import {
   RefreshCw,
   Search,
   Square,
+  SquareTerminal,
   Trash2,
 } from 'lucide-react'
 import { confirmDialog } from './appDialogStore'
+import { WorkspaceContentActionsContext } from '../layout/contentActions'
+import { startAgentSessionDrag } from './agent/agentSessionDrag'
+import { resolveAutomationRunLaunch } from './automationRunLaunch'
 import { useWorkspaceStore } from '../state/store'
 import {
   cancelAutomationRun,
@@ -83,6 +87,7 @@ function runSummary(run: AutomationRunRecord): string {
 
 export function AutomationPanel({ active = true }: AutomationPanelProps) {
   const sessionId = useWorkspaceStore((state) => state.activeSessionId)
+  const contentActions = useContext(WorkspaceContentActionsContext)
   const workspaceName = useWorkspaceStore((state) => state.sessions.find((session) => session.id === state.activeSessionId)?.name ?? 'Workspace')
   const [records, setRecords] = useState<AutomationRecord[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -107,6 +112,27 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
     if (!query) return records
     return records.filter((record) => `${record.name}\n${record.prompt}\n${record.scheduleValue}`.toLocaleLowerCase().includes(query))
   }, [filter, records])
+  // Open an automation run in a live terminal pane: resume the agent's
+  // conversation from the run's worktree, or drop into a shell there.
+  const openRunInTerminal = useCallback(async (worktreePath: string, title: string, paneId?: string) => {
+    if (!contentActions) return
+    try {
+      const launch = await resolveAutomationRunLaunch(worktreePath, title)
+      const panelId = await contentActions.openContent({
+        kind: 'terminal',
+        cwd: launch.cwd,
+        shell: launch.shell,
+        args: launch.args,
+        title: launch.title,
+        replacePaneId: paneId,
+      })
+      if (!panelId) return
+      contentActions.activateContent(panelId)
+    } catch (cause) {
+      setError(String(cause))
+    }
+  }, [contentActions])
+
   const busy = busyKeys.size > 0
   const hasActiveRun = runs.some((run) => ACTIVE_RUN_STATUSES.has(run.status))
 
@@ -295,7 +321,27 @@ export function AutomationPanel({ active = true }: AutomationPanelProps) {
                 <article key={run.id} className="automation-run-card">
                   <header><span className={`automation-run-status ${run.status}`}>{statusLabel(run.status)}</span><time>{formatDate(run.createdAt)}</time></header>
                   <p>{runSummary(run)}</p>
-                  {run.worktree ? <button type="button" title={run.worktree.path} onClick={() => void invoke('reveal_path', { path: run.worktree!.path })}><ExternalLink size={13} /> {run.worktree.disposition === 'retained' ? 'Open retained worktree' : 'Reveal worktree'}</button> : null}
+                  {run.worktree ? (
+                    <div className="automation-run-actions">
+                      <button
+                        type="button"
+                        className={contentActions ? 'automation-run-open is-draggable' : 'automation-run-open'}
+                        title={contentActions ? `터미널에서 열기 (드래그해서 원하는 pane에 놓기) · ${run.worktree.path}` : run.worktree.path}
+                        onPointerDown={(event) => {
+                          if (!contentActions || !run.worktree) return
+                          const path = run.worktree.path
+                          const title = `${selected.name} · run ${run.runNumber}`
+                          startAgentSessionDrag(event.nativeEvent, {
+                            label: title,
+                            canDrag: true,
+                            onDrop: (paneId) => { void openRunInTerminal(path, title, paneId) },
+                            onTap: () => { void openRunInTerminal(path, title, undefined) },
+                          })
+                        }}
+                      ><SquareTerminal size={13} /> 터미널에서 열기</button>
+                      <button type="button" title={run.worktree.path} onClick={() => void invoke('reveal_path', { path: run.worktree!.path })}><ExternalLink size={13} /> {run.worktree.disposition === 'retained' ? 'Open retained worktree' : 'Reveal worktree'}</button>
+                    </div>
+                  ) : null}
                   {ACTIVE_RUN_STATUSES.has(run.status) ? <button type="button" className="danger" disabled={busyKeys.has(`cancel:${run.id}`)} onClick={() => void perform(`cancel:${run.id}`, async () => { await cancelAutomationRun(run.id); await refreshRuns(selected.id) })}><Square size={12} /> Cancel run</button> : null}
                   {run.precheckResult ? <details><summary>Precheck</summary><pre>{run.precheckResult.stdout || run.precheckResult.stderr || run.precheckResult.error || (run.precheckResult.ok ? 'Passed' : 'Failed')}</pre></details> : null}
                   {run.outputSnapshot?.stderr ? <details><summary>Hermes stderr</summary><pre>{run.outputSnapshot.stderr}</pre></details> : null}

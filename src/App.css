@@ -995,3 +995,8 @@ button {
 .workspace-ssh-hint { margin: 2px 0 0; font-size: 11px; color: var(--text-muted, #9aa0aa); line-height: 1.5; }
 .workspace-ssh-hint code { background: var(--surface-2, rgba(255,255,255,0.06)); padding: 1px 5px; border-radius: 4px; }
 .workspace-ssh-shell { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted, #9aa0aa); }
+
+/* Automation run: open-in-terminal + drag */
+.automation-run-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.automation-run-open.is-draggable { cursor: grab; }
+.automation-run-open.is-draggable:active { cursor: grabbing; }
