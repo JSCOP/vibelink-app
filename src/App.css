@@ -982,3 +982,16 @@ button {
 }
 .remote-grant-editor label.is-granted { color: var(--text-primary, #e6e8ee); }
 .remote-grant-editor input[type='checkbox'] { accent-color: var(--accent, #4f8cff); margin: 0; }
+
+/* Workspace create: remote SSH section */
+.workspace-ssh-section { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.workspace-ssh-toggle { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted, #9aa0aa); cursor: pointer; }
+.workspace-ssh-toggle input { accent-color: var(--accent, #4f8cff); }
+.workspace-ssh-fields { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; }
+.workspace-ssh-row { display: flex; align-items: center; gap: 6px; }
+.workspace-ssh-row input { flex: 1; min-width: 0; }
+.workspace-ssh-row .workspace-ssh-port { flex: 0 0 64px; }
+.workspace-ssh-at { color: var(--text-muted, #9aa0aa); font-size: 13px; }
+.workspace-ssh-hint { margin: 2px 0 0; font-size: 11px; color: var(--text-muted, #9aa0aa); line-height: 1.5; }
+.workspace-ssh-hint code { background: var(--surface-2, rgba(255,255,255,0.06)); padding: 1px 5px; border-radius: 4px; }
+.workspace-ssh-shell { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted, #9aa0aa); }

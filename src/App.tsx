@@ -32,6 +32,7 @@ import { TerminalManager } from './terminal/TerminalManager'
 import { agentActivityTracker } from './terminal/agentActivity'
 import { openTerminalLinkTarget } from './terminal/fileLinkNavigation'
 import { isAgentPane, selectedProfileForWorkspace } from './state/profiles'
+import type { WorkspaceSshTarget } from './state/profiles'
 import { buildAttentionByWorkspace, deriveVisibleWorkspaceOrder } from './state/worktreeAttention'
 import { applyThemeToDocument } from './state/themePreview'
 import { workspaceForShortcut } from './state/workspaceShortcuts'
@@ -705,8 +706,8 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
   }, [activeSessionId, selectSession, shortcutSessions, workspaceInteractionSuspended])
 
-  const createWorkspace = async (name: string, workspaceFolder: string | null, profileId: string) => {
-    await createSession(name || undefined, workspaceFolder, profileId)
+  const createWorkspace = async (name: string, workspaceFolder: string | null, profileId: string, sshTarget: WorkspaceSshTarget | null = null) => {
+    await createSession(name || undefined, workspaceFolder, profileId, sshTarget)
     setIsCreateOpen(false)
   }
 
@@ -943,7 +944,7 @@ function App() {
         {isCompletionHistoryOpen ? <CompletionHistoryDialog onClose={() => setIsCompletionHistoryOpen(false)} onActivate={activateCompletionHistoryEntry} /> : null}
         {isSettingsOpen ? <SettingsDialog settings={settings} onChange={updateSettings} onClose={closeSettings} onRunSetupWizard={runSetupWizardAgain} initialSection={settingsSection ?? 'account'} /> : null}
         {isBugReportOpen ? <BugReportDialog onClose={closeBugReport} /> : null}
-        {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId) => void createWorkspace(name, workspaceFolder, profileId)} onClose={() => setIsCreateOpen(false)} /> : null}
+        {isCreateOpen ? <WorkspaceCreateDialog profiles={settings.profiles} defaultProfileId={settings.defaultProfileId} onCreate={(name, workspaceFolder, profileId, sshTarget) => void createWorkspace(name, workspaceFolder, profileId, sshTarget)} onClose={() => setIsCreateOpen(false)} /> : null}
         {editingWorkspace ? <WorkspaceSettingsDialog session={editingWorkspace} settings={settings} onChange={updateSettings} onRename={renameSession} onClose={() => setEditingWorkspaceId(null)} /> : null}
         {isImportReposOpen ? <ImportReposDialog onClose={() => setIsImportReposOpen(false)} /> : null}
         {annotatingCapturePath ? <CaptureAnnotator key={annotatingCapturePath} captureDir={settings.captureDir} imagePath={annotatingCapturePath} onClose={() => setAnnotatingCapturePath(null)} /> : null}

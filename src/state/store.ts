@@ -4,10 +4,10 @@ import { getAccountStatus, signOutAccount as signOutAccountIpc } from '../ipc/ac
 import { getAgentCliStatus, type AgentCliStatus } from '../ipc/agents'
 import { create } from 'zustand'
 import type { AccountStatus, AttachedSession, HermesModelInfo, HermesRuntimeStatus, PaneConfig, PaneMeta, SessionMeta, Task, TaskStatus, WorkspaceBrief } from '../ipc/types'
-import { defaultSettings, isAgentPane, normalizeLegacyWorkspaceWorktrees, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace } from './profiles'
+import { defaultSettings, isAgentPane, normalizeLegacyWorkspaceWorktrees, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, selectedProfileForWorkspace, sshPaneOverridesForWorkspace } from './profiles'
 import { loadManualPaneTitles, normalizePaneTitle, persistManualPaneTitles, shouldApplyAutoTitle, type ManualPaneTitleMap } from './paneTitles'
 import { daemonErrorMessage } from '../ipc/daemonErrors'
-import type { Settings } from './profiles'
+import type { Settings, WorkspaceSshTarget } from './profiles'
 import type { AttentionSnapshot } from './worktreeAttention'
 import type { AgentPaneActivity, PaneScreenState } from './agentPaneStatus'
 import type { WorktreeBlockerKind, WorktreeCheckpoint, WorktreeCheckpointKind, WorktreeCreateRequest, WorktreeCreateResult, WorktreeProjection, WorktreeRecord, WorktreeRemovalPreflight, WorktreeRemovalResult, WorktreeReviewComment, WorktreeReviewCommentRequest, WorktreeSetupPolicy } from '../ipc/worktrees'
@@ -202,7 +202,7 @@ type WorkspaceState = {
   openSession: (sessionId: string) => Promise<AttachedSession>
   attachSession: (sessionId: string, requestEpoch?: number) => Promise<AttachedSession>
   refreshAttachedSession: (sessionId: string) => Promise<AttachedSession | null>
-  createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null) => Promise<SessionMeta>
+  createSession: (name?: string, workspaceFolder?: string | null, profileId?: string | null, sshTarget?: WorkspaceSshTarget | null) => Promise<SessionMeta>
   createWorktreeSession: (input: CreateWorkspaceWorktreeInput) => Promise<SessionMeta>
   cancelPendingWorktreeCreation: (operationId: string) => Promise<void>
   retryPendingWorktreeCreation: (operationId: string) => Promise<SessionMeta>
@@ -583,18 +583,18 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return attached
   },
 
-  createSession: async (name?: string, workspaceFolder?: string | null, profileId?: string | null) => {
+  createSession: async (name?: string, workspaceFolder?: string | null, profileId?: string | null, sshTarget?: WorkspaceSshTarget | null) => {
     const fallbackName = `Workspace ${get().sessions.length + 1}`
     const normalizedFolder = normalizeWorkspaceFolder(workspaceFolder)
     const requestedProfile = profileId ? profileById(get().settings, profileId) : null
-    const created = await invoke<SessionMeta>('create_session', { name: name ?? fallbackName, workspaceFolder: normalizedFolder })
+    // An SSH workspace keeps the folder as a REMOTE path: skip local-folder
+    // normalization, which would mangle a POSIX path on Windows.
+    const created = await invoke<SessionMeta>('create_session', { name: name ?? fallbackName, workspaceFolder: sshTarget ? (workspaceFolder?.trim() || null) : normalizedFolder })
     await get().refreshSessions()
-    if (requestedProfile) {
+    if (requestedProfile || sshTarget) {
       get().updateSettings({
-        workspaceProfileIds: {
-          ...get().settings.workspaceProfileIds,
-          [created.id]: requestedProfile.id,
-        },
+        ...(requestedProfile ? { workspaceProfileIds: { ...get().settings.workspaceProfileIds, [created.id]: requestedProfile.id } } : {}),
+        ...(sshTarget ? { workspaceSshTargets: { ...get().settings.workspaceSshTargets, [created.id]: sshTarget } } : {}),
       })
     }
     await get().attachSession(created.id)
@@ -740,11 +740,14 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       ? profileById(get().settings, overrides.profileId)
       : selectedProfileForWorkspace(get().settings, sessionId)
     const sessionsWorkspaceFolder = get().sessions.find((session) => session.id === sessionId)?.workspaceFolder ?? null
-    const profileDefaults = paneOverridesFromProfile(profile, undefined, { remoteCwd: profile.type === 'ssh' ? sessionsWorkspaceFolder : null })
+    const workspaceSshTarget = get().settings.workspaceSshTargets[sessionId]
+    const profileDefaults = workspaceSshTarget
+      ? sshPaneOverridesForWorkspace(workspaceSshTarget, profile, sessionsWorkspaceFolder)
+      : paneOverridesFromProfile(profile, undefined, { remoteCwd: profile.type === 'ssh' ? sessionsWorkspaceFolder : null })
     const hasShellOverride = Boolean(overrides && 'shell' in overrides)
     const hasCwdOverride = Boolean(overrides && 'cwd' in overrides)
     const hasTitleOverride = Boolean(overrides && 'title' in overrides)
-    const sessionWorkspaceFolder = profile.type === 'ssh' ? null : sessionsWorkspaceFolder
+    const sessionWorkspaceFolder = (profile.type === 'ssh' || workspaceSshTarget) ? null : sessionsWorkspaceFolder
     const cfg: PaneConfig = {
       paneId,
       shell: hasShellOverride ? overrides?.shell ?? null : profileDefaults.shell,

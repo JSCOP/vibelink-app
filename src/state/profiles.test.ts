@@ -1,5 +1,5 @@
-import { describe, expect, test } from 'vitest'
-import { codexLaunchArgv, defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, workspaceDetailsFor } from './profiles'
+import { describe, expect, it, test } from 'vitest'
+import { codexLaunchArgv, defaultSettings, isAgentPane, isAgentProfile, joinCommandLine, normalizeSettings, orderSessions, paneOverridesFromProfile, profileById, profileIconForPane, selectedProfile, selectedProfileForWorkspace, splitCommandLine, sshPaneOverridesForWorkspace, workspaceDetailsFor } from './profiles'
 
 describe('theme revision migration', () => {
   test('moves every retired in-house palette onto the Orca default', () => {
@@ -677,4 +677,45 @@ describe('terminal profiles', () => {
     expect(normalizeSettings({ rolePresets: [] }).rolePresets).toEqual(defaultSettings.rolePresets)
   })
 
+})
+
+describe('sshPaneOverridesForWorkspace', () => {
+  const target = { host: '100.67.54.25', user: 'js', port: 9991, identityFile: null, options: '' }
+  const profile = (id: string, type: 'local' | 'command' = 'local', overrides: Record<string, unknown> = {}) => ({
+    ...defaultSettings.profiles[0], id, name: id, type, ...overrides,
+  }) as never
+
+  it('wraps an agent in ssh with remote cd and the bare agent command', () => {
+    const result = sshPaneOverridesForWorkspace(target, profile('claude'), '/home/js/project')
+    expect(result.shell).toBe('ssh')
+    expect(result.args).toEqual(['-t', '-p', '9991', 'js@100.67.54.25', "cd -- '/home/js/project' && claude"])
+  })
+
+  it('runs a login shell for a plain shell profile', () => {
+    const result = sshPaneOverridesForWorkspace(target, profile('shell'), '/srv/app')
+    expect(result.args[result.args.length - 1]).toBe("cd -- '/srv/app' && exec \"${SHELL:-sh}\" -l")
+  })
+
+  it('omits the remote cd when no folder is set and passes identity/options', () => {
+    const custom = { host: 'h', user: '', port: null, identityFile: 'C:/k/id', options: '-o StrictHostKeyChecking=accept-new' }
+    const result = sshPaneOverridesForWorkspace(custom, profile('codex'), null)
+    expect(result.args).toEqual(['-o', 'StrictHostKeyChecking=accept-new', '-t', '-i', 'C:/k/id', 'h', 'codex'])
+  })
+
+  it('quotes a remote path containing a single quote', () => {
+    const result = sshPaneOverridesForWorkspace(target, profile('omp'), "/home/js/it's here")
+    expect(result.args[result.args.length - 1]).toBe("cd -- '/home/js/it'\\''s here' && omp")
+  })
+
+  it('uses PowerShell Set-Location + semicolon on a Windows remote', () => {
+    const ps = { ...target, remoteShell: 'powershell' as const }
+    const result = sshPaneOverridesForWorkspace(ps, profile('claude'), 'C:/Users/jisung/app')
+    expect(result.args[result.args.length - 1]).toBe("Set-Location -LiteralPath 'C:/Users/jisung/app'; claude")
+  })
+
+  it('uses cmd cd /d + && on a cmd remote', () => {
+    const cmd = { ...target, remoteShell: 'cmd' as const }
+    const result = sshPaneOverridesForWorkspace(cmd, profile('codex'), 'C:/work')
+    expect(result.args[result.args.length - 1]).toBe('cd /d "C:/work" && codex')
+  })
 })

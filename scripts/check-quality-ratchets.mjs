@@ -17,7 +17,7 @@ const sourceBudgets = {
   // 2026-08-20: +16 lines for coalesced input-batch flush (one write_pane per queued burst).
   // 2026-08-20: +screen-state detection scheduling hooks.
   'src/terminal/TerminalManager.ts': 2_472,
-  'src/state/store.ts': 2_207,
+  'src/state/store.ts': 2_210,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_608,
   'src-tauri/src/orchestration/mod.rs': 4_683,

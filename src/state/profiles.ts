@@ -43,6 +43,22 @@ export type WorkspaceDetails = {
   notes: string
 }
 
+/** Optional SSH target attached to a workspace. When set, every pane spawned
+ *  in that workspace runs its agent inside an `ssh` session to this host, with
+ *  the workspace folder treated as the REMOTE working directory. */
+export type RemoteShellKind = 'posix' | 'powershell' | 'cmd'
+
+export type WorkspaceSshTarget = {
+  host: string
+  user: string
+  port: number | null
+  identityFile: string | null
+  options: string
+  /** How to compose `cd <dir> && <agent>` on the remote host. Windows OpenSSH
+   *  defaults to PowerShell, where POSIX `cd --` / `&&` do not work. */
+  remoteShell: RemoteShellKind
+}
+
 const builtInAgentProfileIds = new Set(['claude', 'codex', 'omp'])
 const agentCommandNames = ['claude', 'codex', 'omp', 'opencode']
 const agentNamePhrasePattern = /\b(?:claude code|oh my pi|oh-my-pi|ohmypi)\b/
@@ -99,6 +115,7 @@ export type Settings = {
   defaultProfileId: string
   workspaceProfileIds: Record<string, string>
   workspaceDetails: Record<string, WorkspaceDetails>
+  workspaceSshTargets: Record<string, WorkspaceSshTarget>
   workspaceGroups: WorkspaceGroup[]
   workspaceGroupIds: Record<string, string>
   worktreeStorage: WorktreeStorage
@@ -310,6 +327,7 @@ export const defaultSettings: Settings = {
   defaultProfileId: defaultProfile.id,
   workspaceProfileIds: {},
   workspaceDetails: {},
+  workspaceSshTargets: {},
   workspaceGroups: [],
   workspaceGroupIds: {},
   worktreeStorage: {
@@ -346,6 +364,7 @@ export function normalizeSettings(value: unknown): Settings {
   const defaultProfileId = profiles.some((profile) => profile.id === requestedProfileId) ? requestedProfileId : profiles[0].id
   const workspaceProfileIds = normalizeWorkspaceProfileIds(record?.workspaceProfileIds, profiles)
   const workspaceDetails = normalizeWorkspaceDetails(record?.workspaceDetails)
+  const workspaceSshTargets = normalizeWorkspaceSshTargets(record?.workspaceSshTargets)
   const workspaceGroups = normalizeWorkspaceGroups(record?.workspaceGroups)
   const workspaceGroupIds = normalizeWorkspaceGroupIds(record?.workspaceGroupIds, workspaceGroups)
   const worktreeStorage = normalizeWorktreeStorage(record?.worktreeStorage)
@@ -392,6 +411,7 @@ export function normalizeSettings(value: unknown): Settings {
     defaultProfileId,
     workspaceProfileIds,
     workspaceDetails,
+    workspaceSshTargets,
     workspaceGroups,
     workspaceGroupIds,
     worktreeStorage,
@@ -738,6 +758,67 @@ function normalizeWorkspaceProfileIds(value: unknown, profiles: Profile[]): Reco
   )
 }
 
+function normalizeWorkspaceSshTargets(value: unknown): Record<string, WorkspaceSshTarget> {
+  if (!isRecord(value)) return {}
+  const targets: Record<string, WorkspaceSshTarget> = {}
+  for (const [rawSessionId, raw] of Object.entries(value)) {
+    const sessionId = rawSessionId.trim()
+    if (sessionId.length === 0 || !isRecord(raw)) continue
+    const host = readString(raw.host, '').trim().slice(0, 255)
+    if (host.length === 0) continue
+    const portValue = typeof raw.port === 'number' && Number.isInteger(raw.port) && raw.port > 0 && raw.port <= 65535 ? raw.port : null
+    const remoteShell = raw.remoteShell === 'powershell' || raw.remoteShell === 'cmd' ? raw.remoteShell : 'posix'
+    targets[sessionId] = {
+      host,
+      user: readString(raw.user, '').trim().slice(0, 128),
+      port: portValue,
+      identityFile: readString(raw.identityFile, '').trim() ? readString(raw.identityFile, '').trim() : null,
+      options: readString(raw.options, '').trim().slice(0, 512),
+      remoteShell,
+    }
+  }
+  return targets
+}
+
+/** The bare command to run for a profile on a REMOTE host: the agent binary
+ *  for agent profiles, the raw command line for command profiles, and an empty
+ *  string (login shell) for a plain shell. The pwsh wrapper local profiles use
+ *  is Windows-only and never crosses SSH. */
+export function remoteAgentCommand(profile: Profile): string {
+  const agent = defaultAgentCommand(profile.id)
+  if (agent) return agent
+  if (profile.type === 'command' && profile.command.trim().length > 0) return profile.command.trim()
+  // Agent profiles the user renamed: fall back to a recognizable agent name.
+  const haystack = `${profile.id} ${profile.name}`.toLowerCase()
+  for (const command of agentCommandNames) {
+    if (new RegExp(`(^|[\\s\\\\/"'])${command}([\\s\\\\/"']|$|\\.)`).test(haystack)) return command
+  }
+  return ''
+}
+
+/** Build `ssh` shell+args that run `profile`'s agent on `target`, cd'd into
+ *  `remoteCwd` (the workspace folder, interpreted as a remote path). */
+export function sshPaneOverridesForWorkspace(
+  target: WorkspaceSshTarget,
+  profile: Profile,
+  remoteCwd: string | null,
+  title?: string,
+): Pick<PaneConfig, 'shell' | 'args' | 'cwd' | 'env' | 'title'> {
+  const args = splitCommandLine(target.options)
+  args.push('-t')
+  if (target.port !== null) args.push('-p', String(target.port))
+  if (target.identityFile) args.push('-i', target.identityFile)
+  const host = target.host.trim()
+  const user = target.user.trim()
+  args.push(user.length > 0 ? `${user}@${host}` : host)
+
+  const remoteCommand = remoteAgentCommand(profile)
+  const cwd = typeof remoteCwd === 'string' && remoteCwd.trim().length > 0 ? remoteCwd.trim() : ''
+  const composed = composeRemoteInvocation(target.remoteShell, cwd, remoteCommand)
+  if (composed.length > 0) args.push(composed)
+  return { shell: 'ssh', args, cwd: null, env: profile.env.map(([key, value]) => [key, value]), title: title ?? profile.name }
+}
+
 function normalizeWorkspaceDetails(value: unknown): Record<string, WorkspaceDetails> {
   if (!isRecord(value)) return {}
   const details: Record<string, WorkspaceDetails> = {}
@@ -875,6 +956,34 @@ function remoteCommandFromProfile(profile: Profile, remoteCwdOverride?: string |
   return remoteCommand.length > 0
     ? `${changeDirectory} && ${remoteCommand}`
     : `${changeDirectory} && exec "\${SHELL:-sh}" -l`
+}
+
+/** Build the single remote-command string for `ssh host <cmd>`, matching the
+ *  remote login shell's cd + chaining syntax. Empty command = interactive
+ *  login shell (ssh with no command). */
+function composeRemoteInvocation(shell: RemoteShellKind, cwd: string, command: string): string {
+  if (shell === 'powershell') {
+    const setLocation = cwd.length > 0 ? `Set-Location -LiteralPath ${quotePowerShellStringArg(cwd)}` : ''
+    if (command.length === 0) return setLocation
+    return setLocation.length > 0 ? `${setLocation}; ${command}` : command
+  }
+  if (shell === 'cmd') {
+    const changeDirectory = cwd.length > 0 ? `cd /d ${quoteCmdArg(cwd)}` : ''
+    if (command.length === 0) return changeDirectory
+    return changeDirectory.length > 0 ? `${changeDirectory} && ${command}` : command
+  }
+  // posix
+  if (cwd.length === 0) return command
+  const changeDirectory = `cd -- ${quoteRemoteShellArg(cwd)}`
+  return command.length > 0 ? `${changeDirectory} && ${command}` : `${changeDirectory} && exec "\${SHELL:-sh}" -l`
+}
+
+function quotePowerShellStringArg(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function quoteCmdArg(value: string): string {
+  return `"${value.replace(/"/g, '')}"`
 }
 
 function quoteRemoteShellArg(value: string): string {
