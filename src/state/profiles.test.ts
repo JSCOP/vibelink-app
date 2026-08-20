@@ -680,7 +680,7 @@ describe('terminal profiles', () => {
 })
 
 describe('sshPaneOverridesForWorkspace', () => {
-  const target = { host: '100.67.54.25', user: 'js', port: 9991, identityFile: null, options: '' }
+  const target = { host: '100.67.54.25', user: 'js', port: 9991, identityFile: null, options: '', remoteShell: 'posix' as const }
   const profile = (id: string, type: 'local' | 'command' = 'local', overrides: Record<string, unknown> = {}) => ({
     ...defaultSettings.profiles[0], id, name: id, type, ...overrides,
   }) as never
@@ -697,7 +697,7 @@ describe('sshPaneOverridesForWorkspace', () => {
   })
 
   it('omits the remote cd when no folder is set and passes identity/options', () => {
-    const custom = { host: 'h', user: '', port: null, identityFile: 'C:/k/id', options: '-o StrictHostKeyChecking=accept-new' }
+    const custom = { host: 'h', user: '', port: null, identityFile: 'C:/k/id', options: '-o StrictHostKeyChecking=accept-new', remoteShell: 'posix' as const }
     const result = sshPaneOverridesForWorkspace(custom, profile('codex'), null)
     expect(result.args).toEqual(['-o', 'StrictHostKeyChecking=accept-new', '-t', '-i', 'C:/k/id', 'h', 'codex'])
   })
