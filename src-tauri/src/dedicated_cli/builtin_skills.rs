@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const BUILTIN_SKILL_VERSION: &str = "1.4.1";
+pub const BUILTIN_SKILL_VERSION: &str = "1.4.2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,7 +23,7 @@ Use the dedicated `vibelink` console program. Do not invoke GUI executable compa
 
 - Use `--json` for automation. Stdout is one versioned result or error envelope; diagnostics and 15-second wait keepalives are stderr-only.
 - `status` is the runtime identity gate. During self-hosted VibeLink development, `hostProtected: true` means this pane belongs to the installed release host: never terminate that process or use its UI as evidence for current source changes. The valid current-code window is the exact `hostWindowTitle: "VibeLink Dev"` development target.
-- `daemonUpToDate: false` means the running daemon predates this build and daemon-executed behaviour (browser actions, terminal panes, automation) is still the old one until the app restarts and replaces it.
+- `daemonUpToDate: false` means the running daemon was built from different daemon-side sources and daemon-executed behaviour (browser actions, terminal panes, automation) is still the old one until the app restarts and replaces it. A daemon started by an older app version is up to date whenever its contract matches: the app deliberately keeps it rather than restarting the user's terminals for a GUI-only release.
 - Worktree selection is deterministic: explicit `--worktree <stable-id-or-exact-selector>`, then explicit `--workspace <unique-bound-session>`, then the CLI process's canonical caller cwd and its deepest containing checkout. `--worktree` and `--workspace` are mutually exclusive. Focus, recent tabs, and fuzzy names are never fallback selectors.
 - Mutations carry an operation UUID automatically. Reuse `--operation-id <uuid>` only to replay the identical request after an unknown outcome; the same UUID with different input is a conflict. Use a new UUID for a new decision.
 - `worktree move|remove|set` require `--expected-instance-id`. Removal additionally requires `--confirm`; `--force` works only for the exact acknowledged soft blockers. Main checkout, Git lock, and identity mismatch are hard blockers and cannot be forced.

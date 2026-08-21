@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.6.0"
+version = "0.6.8"
 description = "Agentic workspace terminal for Windows"
 authors = ["JSCOP"]
 license = "GPL-3.0-only"
