@@ -11,6 +11,7 @@ import { useAppChromeStore } from './state/appChrome'
 import { AppDialogHost } from './components/AppDialog'
 import { ToastHost } from './components/toast/ToastHost'
 import { useDaemonReplacementNotice } from './components/toast/daemonReplacementNotice'
+import { useDaemonRestartPrompt } from './components/daemonRestartPrompt'
 import { UpdateCard } from './components/update/UpdateCard'
 import { startAppUpdateChecks } from './components/update/updateStore'
 import { CommandPaletteHost } from './components/palette/CommandPalette'
@@ -108,6 +109,7 @@ function RuntimeIdentityBadge() {
 
 function App() {
   useDaemonReplacementNotice()
+  useDaemonRestartPrompt()
   const contentActionsRef = useRef<WorkspaceContentActions | null>(null)
   const windowClosePendingRef = useRef(false)
   const dirtyPromptActiveRef = useRef(false)

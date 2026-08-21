@@ -19,11 +19,19 @@ fn run_inner() -> Result<()> {
         .truncate(false)
         .open(&paths.lock)?;
 
-    if let Err(err) = lock_file.try_lock() {
-        info!(?err, "another daemon owns the lock");
+    // A replacement hands the daemon over: the outgoing daemon answers the
+    // shutdown request BEFORE it persists panes and exits, so the incoming one
+    // regularly arrives while the lock is still held. Conceding instantly made
+    // that ordinary handoff look like "another daemon is already serving", the
+    // spawned process exited 0, and the app — which had just killed the only
+    // daemon — spent its whole startup budget connecting to nothing before
+    // panicking. Wait the handoff out instead.
+    if !acquire_daemon_lock(&lock_file, LOCK_HANDOFF_TIMEOUT) {
+        info!("another daemon owns the lock");
         return Ok(());
     }
 
+    let mut phases = StartupPhases::new();
     let _pid_file = PidFileGuard::create(paths.pid.clone())?;
     if let Err(err) = write_daemon_info(&paths.info) {
         warn!(?err, "failed to write daemon identity");
@@ -36,8 +44,10 @@ fn run_inner() -> Result<()> {
 
     let state = Arc::new(Mutex::new(DaemonState::new()));
     reconstruct_sessions(Arc::clone(&state), &paths.sessions)?;
+    phases.mark("restore_panes");
     let mut startup_pane_cleanup = StartupPaneCleanup::new(Arc::clone(&state));
     let control = Arc::new(ControlPlane::open(&paths.data_dir)?);
+    phases.mark("open_control_plane");
     let worktree_registry = Arc::new(WorktreeRegistry::new(Arc::clone(&control)));
     let worktree_lifecycle = Arc::new(WorktreeLifecycleService::native(Arc::clone(
         &worktree_registry,
@@ -51,6 +61,7 @@ fn run_inner() -> Result<()> {
         Arc::clone(&worktree_registry),
     )?);
     reconcile_orchestration_startup(&state, &coordinator, &worktrees)?;
+    phases.mark("reconcile_orchestration");
     let automation = Arc::new(AutomationService::open(
         &paths
             .data_dir
@@ -71,10 +82,11 @@ fn run_inner() -> Result<()> {
         platform_process_spawner(paths.data_dir.join("computer-artifacts"), app_flavor),
         computer_host_executable,
     )?;
+    phases.mark("open_automation_and_computer_host");
     let remote = Arc::new(RemoteServer::new(paths.data_dir.clone())?);
-    remote.start_if_enabled()?;
 
     let ipc_secret = Arc::new(load_or_create_ipc_secret()?);
+    phases.mark("load_ipc_secret");
     let boot_id = Uuid::new_v4();
     let connections = Arc::new(Mutex::new(std::collections::HashSet::new()));
     let sessions_path = Arc::new(paths.sessions.clone());
@@ -100,8 +112,22 @@ fn run_inner() -> Result<()> {
     let socket_name = paths::socket_name_string();
     let name = socket_name.as_str().to_ns_name::<GenericNamespaced>()?;
     let listener = ListenerOptions::new().name(name).create_sync()?;
-    info!(socket_name, app_flavor, data_dir = ?paths.data_dir, "daemon listening");
+    phases.mark("bind_socket");
+    info!(
+        socket_name,
+        app_flavor,
+        data_dir = ?paths.data_dir,
+        contract = paths::daemon_contract(),
+        version = env!("CARGO_PKG_VERSION"),
+        boot_ms = phases.total_ms(),
+        "daemon listening"
+    );
     startup_pane_cleanup.disarm();
+    // Remote access is not part of readiness, and starting it costs a
+    // PowerShell `Get-NetFirewallRule` query — seconds on a cold machine.
+    // Running that before the bind delayed every client, including the app,
+    // whose window stays frozen until this daemon answers.
+    start_remote_access_in_background(Arc::clone(&remote));
 
     for stream in listener.incoming() {
         if shutdown.load(Ordering::Acquire) {
@@ -162,9 +188,25 @@ fn write_daemon_info(path: &Path) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         exe: std::env::current_exe().context("resolve daemon executable")?,
         pid: std::process::id(),
+        contract: paths::daemon_contract().to_string(),
     };
     let bytes = serde_json::to_vec(&info).context("serialize daemon identity")?;
     crate::persistence::write_bytes_atomic(path, &bytes)
+}
+
+/// Starts remote access off the readiness path. A failure here only means
+/// phones cannot pair; it must never keep the daemon from serving the desktop.
+fn start_remote_access_in_background(remote: Arc<RemoteServer>) {
+    if let Err(err) = thread::Builder::new()
+        .name("vibelink-remote-autostart".to_string())
+        .spawn(move || {
+            if let Err(err) = remote.start_if_enabled() {
+                warn!(?err, "remote access autostart failed");
+            }
+        })
+    {
+        warn!(?err, "failed to spawn the remote access autostart thread");
+    }
 }
 
 /// Sweeps pane process trees the daemon still parents without owning, and ends
@@ -255,8 +297,7 @@ pub(super) fn exit_daemon_process(state: &SharedState, sessions_path: &Path) -> 
         warn!(?err, "failed to persist state during shutdown");
     }
     if let Ok(paths) = paths::daemon_paths() {
-        let _ = fs::remove_file(paths.pid);
-        let _ = fs::remove_file(paths.info);
+        remove_own_identity_files(&paths.pid, &paths.info);
     }
     std::process::exit(0);
 }
@@ -439,31 +480,6 @@ pub(super) fn request_computer_host(
         .map_err(anyhow::Error::from)
 }
 
-pub(super) struct PidFileGuard {
-    path: PathBuf,
-    info: PathBuf,
-}
-
-impl PidFileGuard {
-    pub(super) fn create(path: PathBuf) -> Result<Self> {
-        fs::write(&path, std::process::id().to_string())?;
-        let mut info_name = path
-            .file_stem()
-            .unwrap_or_else(|| OsStr::new("daemon"))
-            .to_os_string();
-        info_name.push("-info.json");
-        let info = path.with_file_name(info_name);
-        Ok(Self { path, info })
-    }
-}
-
-impl Drop for PidFileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-        let _ = fs::remove_file(&self.info);
-    }
-}
-
 pub(super) const DAEMON_LOG_ROTATE_LIMIT: u64 = 8 * 1024 * 1024;
 
 pub(super) fn rotate_daemon_log(log_path: &Path) {
@@ -623,8 +639,14 @@ fn init_logging(log_path: &Path) {
         return;
     };
 
+    // An unset `RUST_LOG` used to leave the daemon at ERROR, so a release build
+    // recorded broken pipes and nothing about its own startup — the one thing
+    // needed to explain a launch that outran the app's readiness budget. INFO
+    // is the floor; the log rotates at 8 MB either way.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(filter)
         .with_writer(writer)
         .try_init();
 }

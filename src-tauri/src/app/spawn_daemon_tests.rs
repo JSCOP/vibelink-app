@@ -372,6 +372,30 @@ fn shutdown_missing_pid_file_is_noop() {
     assert!(!shutdown_daemon_from_pid_file(&path).expect("missing pid is ok"));
 }
 
+/// A daemon acknowledges the shutdown request before it persists panes, kills
+/// their process trees, and releases `daemon.lock`. Spawning the replacement on
+/// the acknowledgement raced the teardown: the replacement lost the lock, quit,
+/// and the app — which had just killed the only daemon — ran out its startup
+/// budget and died. The caller waits for the process to be gone instead.
+#[cfg(windows)]
+#[test]
+fn waiting_for_a_daemon_to_exit_reports_exit_and_survival() {
+    let mut child = Command::new("cmd.exe")
+        .args(["/C", "exit"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn short-lived process");
+    let exiting = child.id();
+    assert!(wait_for_daemon_exit(exiting, Duration::from_secs(5)).expect("wait for exit"));
+    let _ = child.wait();
+
+    let own_pid = std::process::id();
+    assert!(!wait_for_daemon_exit(own_pid, Duration::from_millis(150))
+        .expect("wait for a live process"));
+}
+
 #[test]
 fn stale_recovery_is_limited_to_unhealthy_existing_daemon() {
     let connect_error = StartupAttemptError::connect(anyhow!("connect failed"));
@@ -381,22 +405,46 @@ fn stale_recovery_is_limited_to_unhealthy_existing_daemon() {
     assert!(unhealthy_error.should_recover_stale_daemon());
 }
 
+/// Shipped once as an executable-bytes comparison, and every reinstall then
+/// replaced the daemon: the GUI and the daemon are one binary, so a frontend
+/// change, a version bump, or a plain rebuild all produced a "new" daemon and
+/// killed the user's terminal panes. Only the daemon contract may decide this.
 #[test]
-fn daemon_identity_staleness_uses_expected_executable_path() {
-    let expected_exe = Path::new(r"C:\VibeLink\daemon-bin\app-daemon-prod-current.exe");
+fn daemon_staleness_follows_the_daemon_contract_not_the_app_build() {
+    let expected_contract = "0004a1-1122334455667788";
     let matching = paths::DaemonInfo {
         version: "0.5.24".to_string(),
-        exe: expected_exe.to_path_buf(),
+        exe: PathBuf::from(r"C:\VibeLink\daemon-bin\app-daemon-prod-current.exe"),
         pid: 35_588,
+        contract: expected_contract.to_string(),
     };
-    let differing = paths::DaemonInfo {
-        exe: PathBuf::from(r"C:\VibeLink\daemon-bin\app-daemon-prod-old.exe"),
+    // Older app build, different executable, same daemon behaviour: keep it.
+    let older_app_same_daemon = paths::DaemonInfo {
+        version: "0.4.18".to_string(),
+        exe: PathBuf::from(r"C:\VibeLink\daemon-bin\app-daemon-prod-older.exe"),
+        ..matching.clone()
+    };
+    let changed_daemon = paths::DaemonInfo {
+        contract: "0004a1-8877665544332211".to_string(),
+        ..matching.clone()
+    };
+    // An identity file written before the contract field existed.
+    let legacy = paths::DaemonInfo {
+        contract: String::new(),
         ..matching.clone()
     };
 
-    assert!(!daemon_info_is_stale(Some(&matching), expected_exe));
-    assert!(daemon_info_is_stale(Some(&differing), expected_exe));
-    assert!(daemon_info_is_stale(None, expected_exe));
+    assert!(!daemon_info_is_stale(Some(&matching), expected_contract));
+    assert!(!daemon_info_is_stale(
+        Some(&older_app_same_daemon),
+        expected_contract
+    ));
+    assert!(daemon_info_is_stale(
+        Some(&changed_daemon),
+        expected_contract
+    ));
+    assert!(daemon_info_is_stale(Some(&legacy), expected_contract));
+    assert!(daemon_info_is_stale(None, expected_contract));
 }
 
 /// Shipped once and caused a live daemon restart loop. The identity comparison
@@ -519,6 +567,18 @@ fn unhealthy_probe_after_spawn_keeps_retrying_until_deadline() {
     assert!(!should_retry_startup_attempt(&unhealthy_error, false));
 }
 
+/// `build.rs` must keep emitting the fingerprint: an empty contract would make
+/// every daemon look current and never replace one that actually changed.
+#[test]
+fn the_build_emits_a_daemon_contract() {
+    let contract = paths::daemon_contract();
+
+    assert!(contract.contains('-'), "contract shape: {contract}");
+    let (bytes, hash) = contract.split_once('-').expect("contract separator");
+    assert!(u64::from_str_radix(bytes, 16).expect("hashed byte count") > 0);
+    assert_eq!(hash.len(), 16);
+}
+
 #[test]
 fn socket_name_converts_to_namespaced_socket_name() {
     let name = socket_name().expect("namespaced socket name");
@@ -556,23 +616,31 @@ fn daemon_executable_copy_uses_data_dir_instead_of_source_exe() {
     let _ = fs::remove_dir_all(temp);
 }
 
+/// The staged daemon is keyed by contract, so a rebuilt app whose daemon
+/// sources did not change reuses the copy already on disk instead of writing
+/// ~45 MB again while the window is frozen waiting for it.
 #[cfg(windows)]
 #[test]
-fn executable_identity_changes_with_executable_bytes() {
+fn a_rebuilt_app_reuses_the_staged_daemon_for_the_same_contract() {
     let temp = std::env::temp_dir().join(format!(
-        "vibelink-daemon-identity-{}-{}",
+        "vibelink-daemon-restage-{}-{}",
         std::process::id(),
         uuid::Uuid::new_v4()
     ));
-    fs::create_dir_all(&temp).expect("create temp dir");
-    let source = temp.join("app.exe");
+    let source = temp.join("target").join("debug").join("app.exe");
+    let data_dir = temp.join("data");
+    fs::create_dir_all(source.parent().expect("source parent")).expect("create source dir");
+    fs::write(&source, b"first app build").expect("write source exe");
 
-    fs::write(&source, b"one").expect("write first exe");
-    let first = executable_identity(&source).expect("hash first exe");
-    fs::write(&source, b"two").expect("write second exe");
-    let second = executable_identity(&source).expect("hash second exe");
+    let first = prepare_daemon_executable_in(&source, &data_dir).expect("stage daemon exe");
+    fs::write(&source, b"second app build, same daemon").expect("rebuild source exe");
+    let second = prepare_daemon_executable_in(&source, &data_dir).expect("restage daemon exe");
 
-    assert_ne!(first, second);
+    assert_eq!(first, second);
+    assert_eq!(
+        fs::read(&second).expect("read staged daemon exe"),
+        b"first app build"
+    );
 
     let _ = fs::remove_dir_all(temp);
 }

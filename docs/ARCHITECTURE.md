@@ -35,9 +35,15 @@ The host owns work that must remain attached to the desktop process: the OS wind
 
 ### 3. Detached daemon
 
-The daemon is the same application executable launched with `--daemon`. Before spawning it, `src-tauri/src/app/spawn_daemon.rs` copies the executable and bundled ConPTY files into the flavor-specific app-data `daemon-bin` directory. The copy is content-addressed, so the detached process does not lock the executable in the build or installation directory.
+The daemon is the same application executable launched with `--daemon`. Before spawning it, `src-tauri/src/app/spawn_daemon.rs` copies the executable and bundled ConPTY files into the flavor-specific app-data `daemon-bin` directory, so the detached process does not lock the executable in the build or installation directory.
 
 The daemon owns long-lived workspaces, terminal panes, PTYs, scrollback, automation, orchestration, and Remote connections. It can outlive the WebView and Tauri host so reopening the app can reattach to processes that are still running.
+
+#### Daemon identity and replacement
+
+Because the GUI and the daemon are one executable, "is this daemon current?" cannot be asked of the executable's bytes: every rebuild, frontend change, and version bump would answer no, replace the running daemon, and kill every terminal pane with it. `build.rs` therefore fingerprints the daemon-side sources into `VIBELINK_DAEMON_CONTRACT` (include by default, exclude GUI-only modules explicitly), the daemon records it in `daemon-info.json`, and the app replaces a running daemon only when that contract differs from its own. The staged `daemon-bin` copy is keyed by the same contract. `vibelink status --json` reports it as `daemonUpToDate`.
+
+Replacement overlaps two processes, and `src-tauri/src/daemon/handoff.rs` owns that overlap: the outgoing daemon acknowledges the shutdown request before it persists panes and releases `daemon.lock`, so the app waits for the process to actually exit, an incoming daemon waits out a lock a predecessor still holds, and neither deletes pid or identity files that describe the other. A daemon binds its socket last and logs each startup phase at INFO, so a start that outruns the app's readiness budget is readable in `daemon.log`.
 
 ## IPC boundaries
 

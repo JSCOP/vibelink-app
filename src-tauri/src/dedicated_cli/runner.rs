@@ -125,8 +125,13 @@ fn status_result(
     daemon_info: Option<paths::DaemonInfo>,
 ) -> Value {
     let flavor_name = flavor.as_str();
+    // "Up to date" is about daemon BEHAVIOUR, not about the app version: the
+    // app deliberately keeps a running daemon whose contract still matches, so
+    // a version comparison would report every GUI-only release as out of date.
+    let daemon_up_to_date = daemon_info
+        .as_ref()
+        .is_some_and(|info| info.contract == paths::daemon_contract());
     let daemon_version = daemon_info.map(|info| info.version);
-    let daemon_up_to_date = daemon_version.as_deref() == Some(env!("CARGO_PKG_VERSION"));
     json!({
         "state": "running",
         "flavor": flavor,
@@ -482,20 +487,36 @@ mod tests {
         assert_eq!(development["hostWindowTitle"], "VibeLink Dev");
     }
 
+    /// A daemon carrying this build's contract is current even when it was
+    /// started by an older app build: the app keeps such a daemon alive rather
+    /// than restarting the user's terminals for a GUI-only release.
     #[test]
-    fn status_reports_matching_daemon_version_as_up_to_date() {
-        let status = status_result(
+    fn status_reports_a_matching_daemon_contract_as_up_to_date() {
+        let current = status_result(
+            Flavor::Prod,
+            "prod-socket".to_string(),
+            Some(paths::DaemonInfo {
+                version: "0.6.0".to_string(),
+                exe: "daemon.exe".into(),
+                pid: 42,
+                contract: paths::daemon_contract().to_string(),
+            }),
+        );
+        assert_eq!(current["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(current["daemonVersion"], "0.6.0");
+        assert_eq!(current["daemonUpToDate"], true);
+
+        let superseded = status_result(
             Flavor::Prod,
             "prod-socket".to_string(),
             Some(paths::DaemonInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 exe: "daemon.exe".into(),
                 pid: 42,
+                contract: "000000-0000000000000000".to_string(),
             }),
         );
-        assert_eq!(status["version"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(status["daemonVersion"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(status["daemonUpToDate"], true);
+        assert_eq!(superseded["daemonUpToDate"], false);
     }
 
     #[test]

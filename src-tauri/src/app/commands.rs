@@ -178,6 +178,11 @@ pub fn take_daemon_replacement() -> Option<super::spawn_daemon::DaemonReplacemen
     super::spawn_daemon::take_daemon_replacement()
 }
 
+#[tauri::command]
+pub fn pending_daemon_restart() -> Option<super::spawn_daemon::DaemonRestartRequest> {
+    super::spawn_daemon::pending_daemon_restart()
+}
+
 /// Mirrors `settings.sessionRestore` / `settings.minimizeToTrayOnClose` into
 /// native state, because `RunEvent::Exit` cannot call into the WebView.
 #[tauri::command]
@@ -649,10 +654,17 @@ pub async fn kill_pane_process(
 #[tauri::command]
 pub async fn restart_daemon(client: State<'_, DaemonClient>) -> Result<(), String> {
     let client = client.inner().clone();
+    // Counted before the restart, while the outgoing daemon can still answer.
+    tauri::async_runtime::spawn_blocking(super::spawn_daemon::note_confirmed_daemon_restart)
+        .await
+        .map_err(|err| err.to_string())?;
     tauri::async_runtime::spawn_blocking(move || client.restart())
         .await
         .map_err(|err| err.to_string())?
-        .map_err(to_string)
+        .map_err(to_string)?;
+    // The daemon now runs this build, so the standing offer is answered.
+    super::spawn_daemon::clear_daemon_restart_request();
+    Ok(())
 }
 
 #[tauri::command]

@@ -28,6 +28,15 @@ pub struct DaemonInfo {
     pub version: String,
     pub exe: PathBuf,
     pub pid: u32,
+    /// Fingerprint of the daemon-side sources this daemon was built from
+    /// (`VIBELINK_DAEMON_CONTRACT`). The app replaces a running daemon when
+    /// this differs from its own, NOT when the app version differs: the GUI and
+    /// the daemon ship in one executable, so a frontend-only release must not
+    /// take the user's terminal panes down with it. An info file written before
+    /// this field existed reads back empty and is therefore always replaced
+    /// once.
+    #[serde(default)]
+    pub contract: String,
 }
 
 pub fn daemon_paths() -> Result<DaemonPaths> {
@@ -49,6 +58,13 @@ pub fn daemon_paths() -> Result<DaemonPaths> {
 
 pub fn read_daemon_info(path: &Path) -> Option<DaemonInfo> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+/// Fingerprint of the daemon-side sources this build was compiled from, as
+/// computed by `build.rs`. Two builds that share it run the same daemon
+/// behaviour even when their app versions differ.
+pub fn daemon_contract() -> &'static str {
+    env!("VIBELINK_DAEMON_CONTRACT")
 }
 
 pub fn socket_name_string() -> String {
@@ -249,6 +265,7 @@ mod tests {
             version: "0.5.24".to_string(),
             exe: PathBuf::from(r"C:\VibeLink\daemon-bin\app-daemon-prod-current.exe"),
             pid: 35_588,
+            contract: "0004a1-1122334455667788".to_string(),
         };
 
         assert_eq!(read_daemon_info(&path), None);
@@ -260,6 +277,18 @@ mod tests {
         )
         .expect("write daemon info");
         assert_eq!(read_daemon_info(&path), Some(expected));
+
+        // An info file written before the contract field existed must still
+        // parse; it reads back empty so the app replaces that daemon once.
+        fs::write(
+            &path,
+            br#"{"version":"0.6.0","exe":"C:\\old.exe","pid":11}"#,
+        )
+        .expect("write legacy daemon info");
+        assert_eq!(
+            read_daemon_info(&path).map(|info| info.contract),
+            Some(String::new())
+        );
 
         let _ = fs::remove_file(path);
     }

@@ -1,5 +1,6 @@
 // Daemon module map:
 // - `bootstrap`: startup, schedulers, process cleanup, persistence recovery, and shutdown.
+// - `handoff`: the replacement overlap — daemon lock, pid/identity file ownership, boot timings.
 // - `auth`: admission challenge/proof checks, capability authorization, and policy revocation.
 // - `connection`: socket client lifecycle and desktop browser-host request routing.
 // - `dispatch`: the central protocol router plus CLI, orchestration, worktree, and Remote handlers.
@@ -19,6 +20,7 @@ mod browser_cdp;
 mod connection;
 pub(crate) mod conpty;
 mod dispatch;
+mod handoff;
 mod lifecycle;
 mod panes;
 pub mod paths;
@@ -37,7 +39,7 @@ use bootstrap::{
     request_computer_host,
 };
 #[cfg(test)]
-use bootstrap::{reconstruct_sessions, rotate_daemon_log, PidFileGuard, DAEMON_LOG_ROTATE_LIMIT};
+use bootstrap::{reconstruct_sessions, rotate_daemon_log, DAEMON_LOG_ROTATE_LIMIT};
 use connection::{
     dispatch_browser_host_request, handle_connection, register_browser_host,
     resolve_browser_host_response, BrowserHostRouter,
@@ -52,6 +54,10 @@ use dispatch::{
     automation_workspace, bounded_launch_error, dispatch_message, persist_state,
     provision_automation_worktree, request_id, require_workers_stopped,
     run_automation_in_visible_terminal, stop_debounced_persister,
+};
+use handoff::{
+    acquire_daemon_lock, remove_own_identity_files, PidFileGuard, StartupPhases,
+    LOCK_HANDOFF_TIMEOUT,
 };
 #[cfg(test)]
 use panes::send_output_to_clients;

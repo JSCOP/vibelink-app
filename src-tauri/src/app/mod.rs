@@ -470,6 +470,7 @@ pub fn run() {
             commands::list_sessions,
             commands::ping,
             commands::take_daemon_replacement,
+            commands::pending_daemon_restart,
             commands::rename_session,
             commands::set_session_workspace_folder,
             commands::resource_snapshot,

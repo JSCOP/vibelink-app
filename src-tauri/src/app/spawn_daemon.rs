@@ -46,6 +46,69 @@ pub struct DaemonReplacement {
 
 static DAEMON_REPLACEMENT: OnceLock<Mutex<Option<DaemonReplacement>>> = OnceLock::new();
 
+/// A running daemon whose behaviour predates this build, still serving the app.
+///
+/// Replacing it costs every running command, so the app does not decide that on the user's behalf
+/// during startup. It keeps talking to the daemon that is already there and offers the restart.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DaemonRestartRequest {
+    pub from_version: Option<String>,
+    pub to_version: String,
+}
+
+static DAEMON_RESTART_REQUEST: OnceLock<Mutex<Option<DaemonRestartRequest>>> = OnceLock::new();
+
+fn record_daemon_restart_request(request: DaemonRestartRequest) {
+    *DAEMON_RESTART_REQUEST
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("daemon restart request mutex poisoned") = Some(request);
+}
+
+/// Reads the pending request WITHOUT consuming it.
+///
+/// Declining is not a permanent answer: the offer stands until the daemon is actually restarted,
+/// so a user who dismisses it can still take it later from the same session.
+pub fn pending_daemon_restart() -> Option<DaemonRestartRequest> {
+    DAEMON_RESTART_REQUEST
+        .get()?
+        .lock()
+        .expect("daemon restart request mutex poisoned")
+        .clone()
+}
+
+pub fn clear_daemon_restart_request() {
+    if let Some(slot) = DAEMON_RESTART_REQUEST.get() {
+        *slot.lock().expect("daemon restart request mutex poisoned") = None;
+    }
+}
+
+fn record_daemon_replacement(replacement: DaemonReplacement) {
+    *DAEMON_REPLACEMENT
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .expect("daemon replacement mutex poisoned") = Some(replacement);
+}
+
+/// Records what a user-confirmed restart cost, for the notice the app shows afterwards.
+///
+/// The pane count comes from the daemon rather than the window, because the daemon is the
+/// authority: a pane can be live there and not currently mounted here. The connection is its own
+/// short-lived one, since the client this reports on is the one about to be torn down.
+pub fn note_confirmed_daemon_restart() {
+    let terminated_panes = match connect_ready_daemon(ClientKind::App) {
+        Ok(stream) => running_daemon_pane_count(stream),
+        Err(_) => 0,
+    };
+    let from_version = pending_daemon_restart().and_then(|request| request.from_version);
+    record_daemon_replacement(DaemonReplacement {
+        from_version,
+        to_version: env!("CARGO_PKG_VERSION").to_string(),
+        terminated_panes,
+    });
+}
+
 pub fn take_daemon_replacement() -> Option<DaemonReplacement> {
     DAEMON_REPLACEMENT
         .get()?
@@ -279,9 +342,15 @@ impl Drop for ReparentedDaemon {
 #[derive(Debug, Default)]
 pub(super) struct StartupRecoveryBudget {
     unrecorded_recovery_attempted: bool,
-    identity_recovery_attempted: bool,
+    /// Daemons this startup has spawned. A spawned daemon that exits without
+    /// serving is a normal handoff outcome, not a dead end, so the budget
+    /// allows a bounded number of retries instead of leaving the app with no
+    /// daemon and no plan to start one.
+    spawns: u32,
     replacement: Option<DaemonReplacement>,
 }
+
+const MAX_DAEMON_SPAWNS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordedDaemonState {
@@ -348,8 +417,7 @@ pub(super) fn ensure_daemon_with_recovery_for(
     let initial_error = loop {
         match connect_ready_daemon(client_kind) {
             Ok(stream) => {
-                if let Some(stream) = reuse_or_replace_ready_daemon(stream, recovery, client_kind)?
-                {
+                if let Some(stream) = reuse_or_replace_ready_daemon(stream, client_kind)? {
                     return Ok(stream);
                 }
                 break None;
@@ -369,7 +437,7 @@ pub(super) fn ensure_daemon_with_recovery_for(
         None
     };
 
-    let mut spawned_daemon = Some(spawn_daemon_process()?);
+    let mut spawned_daemon = Some(spawn_recorded_daemon_process(recovery)?);
 
     let deadline = Instant::now() + DAEMON_STARTUP_TIMEOUT;
     while Instant::now() < deadline {
@@ -382,7 +450,16 @@ pub(super) fn ensure_daemon_with_recovery_for(
                     "spawned daemon exited before becoming ready: {status}"
                 ));
                 if recover_unrecorded_after_spawn_exit(recovery)? {
-                    spawned_daemon = Some(spawn_daemon_process()?);
+                    spawned_daemon = Some(spawn_recorded_daemon_process(recovery)?);
+                    continue;
+                }
+                // Nothing to recover: the daemon most likely lost the lock to
+                // an outgoing daemon that had not finished exiting. Giving up
+                // here left the app polling a socket nobody would ever open,
+                // until the startup budget ran out and the process died.
+                if recovery.spawns < MAX_DAEMON_SPAWNS {
+                    thread::sleep(DAEMON_READY_DELAY);
+                    spawned_daemon = Some(spawn_recorded_daemon_process(recovery)?);
                     continue;
                 }
                 spawned_daemon = None;
@@ -432,39 +509,39 @@ pub(super) fn ensure_daemon_with_recovery_for(
 /// owner: it must never take down the user's terminals as a side effect.
 fn reuse_or_replace_ready_daemon(
     stream: DaemonStream,
-    recovery: &mut StartupRecoveryBudget,
     client_kind: ClientKind,
 ) -> Result<Option<DaemonStream>> {
     if !client_kind_may_replace_daemon(client_kind) {
         return Ok(Some(stream));
     }
     let daemon_paths = paths::daemon_paths()?;
-    let expected_exe = expected_daemon_executable(&daemon_paths.data_dir)?;
     let info = paths::read_daemon_info(&daemon_paths.info);
-    if !daemon_info_is_stale(info.as_ref(), &expected_exe) {
+    if !daemon_info_is_stale(info.as_ref(), paths::daemon_contract()) {
         return Ok(Some(stream));
     }
-    if recovery.identity_recovery_attempted {
-        bail!("stale daemon replacement was already attempted");
-    }
-    recovery.identity_recovery_attempted = true;
-
-    let terminated_panes = running_daemon_pane_count(stream);
-    let from_version = info.map(|info| info.version);
-    if !shutdown_daemon().context("shutdown stale daemon")? {
-        bail!("stale daemon did not shut down");
-    }
-    recovery.replacement = Some(DaemonReplacement {
-        from_version,
+    // Stale is not a reason to kill it. The daemon answered the protocol handshake, so this build
+    // can talk to it; what differs is daemon-side behaviour, and adopting the new behaviour costs
+    // every command currently running under the old one. That is the user's trade to make, so the
+    // request is recorded and `restart_daemon` performs it on their word.
+    record_daemon_restart_request(DaemonRestartRequest {
+        from_version: info.map(|info| info.version),
         to_version: env!("CARGO_PKG_VERSION").to_string(),
-        terminated_panes,
     });
-    Ok(None)
+    Ok(Some(stream))
 }
 
-fn daemon_info_is_stale(info: Option<&paths::DaemonInfo>, expected_exe: &Path) -> bool {
+/// A daemon is stale when it does not run THIS build's daemon behaviour.
+///
+/// This used to compare the daemon's executable path, which embedded a hash of
+/// the whole app binary — so every reinstall, including one that only rebuilt
+/// the frontend or bumped the version, produced a new identity, replaced the
+/// running daemon, and killed every terminal pane with it. The contract
+/// fingerprint covers the daemon-side sources only, so the daemon is replaced
+/// when its behaviour actually changed. An identity file that predates the
+/// field carries an empty contract and is replaced once.
+fn daemon_info_is_stale(info: Option<&paths::DaemonInfo>, expected_contract: &str) -> bool {
     match info {
-        Some(info) => info.exe != expected_exe,
+        Some(info) => info.contract != expected_contract,
         None => true,
     }
 }
@@ -800,12 +877,16 @@ fn shutdown_daemon_with(clean_exit: bool) -> Result<bool> {
 
 const SHUTDOWN_REQ: Req = u64::MAX;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the outgoing daemon gets to finish its teardown and release
+/// `daemon.lock` after acknowledging the shutdown, before it is terminated.
+const DAEMON_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+const DAEMON_EXIT_POLL: Duration = Duration::from_millis(50);
 
 fn graceful_shutdown(pid_path: &Path, clean_exit: bool) -> Result<bool> {
     // Only attempt if daemon is running.
-    if read_daemon_pid(pid_path)?.is_none() {
+    let Some(pid) = read_daemon_pid(pid_path)? else {
         return Ok(false);
-    }
+    };
 
     let stream = match connect_daemon() {
         Ok(stream) => stream,
@@ -836,10 +917,35 @@ fn graceful_shutdown(pid_path: &Path, clean_exit: bool) -> Result<bool> {
 
     match rx.recv_timeout(SHUTDOWN_TIMEOUT) {
         Ok(Ok(())) => {
+            // The daemon acknowledges BEFORE it persists panes, kills their
+            // process trees, and releases `daemon.lock`. Returning here let the
+            // caller spawn the replacement into a lock the outgoing daemon
+            // still held; that replacement exited immediately and the app,
+            // having just killed the only daemon, ran out its startup budget
+            // and died. Wait for the process to actually be gone.
+            if !wait_for_daemon_exit(pid, DAEMON_EXIT_TIMEOUT)? {
+                terminate_daemon_pid(pid).with_context(|| {
+                    format!("terminate daemon pid {pid} after graceful timeout")
+                })?;
+            }
             let _ = fs::remove_file(pid_path);
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+/// Polls until `pid` is gone or `timeout` elapses. Reports whether it exited.
+fn wait_for_daemon_exit(pid: u32, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_exists(pid)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(DAEMON_EXIT_POLL);
     }
 }
 
@@ -1046,6 +1152,11 @@ fn terminate_daemon_pid(pid: u32) -> Result<()> {
     }
 }
 
+fn spawn_recorded_daemon_process(recovery: &mut StartupRecoveryBudget) -> Result<SpawnedDaemon> {
+    recovery.spawns += 1;
+    spawn_daemon_process()
+}
+
 fn spawn_daemon_process() -> Result<SpawnedDaemon> {
     match spawn_configured_daemon(true) {
         Ok(child) => Ok(child),
@@ -1118,20 +1229,6 @@ fn daemon_executable() -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn expected_daemon_executable(data_dir: &Path) -> Result<PathBuf> {
-    let current_exe = std::env::current_exe().context("resolve current executable")?;
-    Ok(daemon_copy_path(
-        &daemon_bin_dir(data_dir),
-        &executable_identity(&current_exe)?,
-    ))
-}
-
-#[cfg(not(windows))]
-fn expected_daemon_executable(_data_dir: &Path) -> Result<PathBuf> {
-    std::env::current_exe().context("resolve current executable")
-}
-
-#[cfg(windows)]
 fn prepare_daemon_executable(source: &Path) -> Result<PathBuf> {
     let daemon_paths = paths::daemon_paths()?;
     prepare_daemon_executable_in(source, &daemon_paths.data_dir)
@@ -1139,12 +1236,15 @@ fn prepare_daemon_executable(source: &Path) -> Result<PathBuf> {
 
 #[cfg(windows)]
 fn prepare_daemon_executable_in(source: &Path, data_dir: &Path) -> Result<PathBuf> {
-    let identity = executable_identity(source)?;
+    let identity = paths::daemon_contract();
     let dir = daemon_bin_dir(data_dir);
     fs::create_dir_all(&dir)
         .with_context(|| format!("create daemon executable directory {}", dir.display()))?;
-    let target = daemon_copy_path(&dir, &identity);
+    let target = daemon_copy_path(&dir, identity);
 
+    // Keyed by daemon contract, not by app build: a release that changed only
+    // the GUI reuses the staged daemon instead of writing a fresh copy of a
+    // ~45 MB executable on the startup path.
     if !target.exists() {
         copy_daemon_executable(source, &target)?;
     }
@@ -1334,34 +1434,6 @@ fn cleanup_old_daemon_executables(dir: &Path, current: &Path) {
             let _ = fs::remove_file(path);
         }
     }
-}
-
-#[cfg(windows)]
-fn executable_identity(path: &Path) -> Result<String> {
-    const OFFSET: u64 = 0xcbf29ce484222325;
-    const PRIME: u64 = 0x100000001b3;
-
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("open executable for hashing {}", path.display()))?;
-    let mut hash = OFFSET;
-    let mut len = 0_u64;
-    let mut buf = [0_u8; 64 * 1024];
-
-    loop {
-        let read = file
-            .read(&mut buf)
-            .with_context(|| format!("read executable for hashing {}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        len += read as u64;
-        for byte in &buf[..read] {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-    }
-
-    Ok(format!("{len:016x}-{hash:016x}"))
 }
 
 #[cfg(windows)]
