@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event'
 import { Terminal } from '@xterm/xterm'
 import { ClipboardAddon } from '@xterm/addon-clipboard'
 import { PaneFitAddon, showPaneScrollbar } from './scrollbar'
+import { guardRedundantProtocolChanges, keepScrollPositionAcrossMouseReports, resolveWheelAction, terminalCellHeight, wheelScrollLines } from './mouseReporting'
 import { SearchAddon } from '@xterm/addon-search'
 import type { ISearchOptions } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
@@ -254,6 +255,8 @@ type Entry = {
   syncHoldUntil?: number
   /** Whether this pane's xterm scrollbar was switched to always-visible. */
   scrollbarPersistent?: boolean
+  /** Whether this pane's mouse-reporting fix-ups were installed; see mouseReporting.ts. */
+  mouseReportingFixed?: boolean
   webgl?: WebglAddon
   webglAttachFailed?: boolean
   webglPromotionPending?: boolean
@@ -586,20 +589,25 @@ class TerminalManagerImpl {
       return true
     })
     term.attachCustomWheelEventHandler((event) => {
-      // In the alternate buffer without wheel-capable mouse reporting, xterm
-      // converts wheel events into arrow-key sequences (CSI A/B). Full-screen
-      // TUIs such as OMP treat ArrowUp as prompt-history recall, so wheeling
-      // corrupts the prompt instead of scrolling — and the alternate buffer
-      // has no scrollback to scroll either. Swallow the event. TUIs that
-      // enable wheel reporting (vt200/drag/any: vim, htop, ...) still receive
-      // real wheel reports via the return-true path; x10 tracks button-down
-      // only, so it gets the same suppression.
-      const wheelReported = term.modes.mouseTrackingMode !== 'none' && term.modes.mouseTrackingMode !== 'x10'
-      if (term.buffer.active.type === 'alternate' && !wheelReported) {
-        event.preventDefault()
-        return false
+      // resolveWheelAction carries the reasoning and the measurements: the
+      // alternate buffer keeps its swallow (xterm would otherwise send CSI A/B,
+      // which OMP reads as prompt-history recall), while an inline TUI that
+      // enabled mouse reporting no longer takes the wheel away from a
+      // scrollback that really exists. Both non-default branches cancel the
+      // event themselves — xterm's own listener returns on a `false` result
+      // without cancelling (CoreBrowserTerminal.ts:810).
+      const action = resolveWheelAction({
+        bufferType: term.buffer.active.type,
+        mouseTrackingMode: term.modes.mouseTrackingMode,
+        altKey: event.altKey,
+      })
+      if (action === 'default') return true
+      if (action === 'scroll-viewport') {
+        const lines = wheelScrollLines(event, terminalCellHeight(term), term.rows)
+        if (lines !== 0) term.scrollLines(lines)
       }
-      return true
+      event.preventDefault()
+      return false
     })
 
     const entry: Entry = { paneId, term, fit, search, serialize, opened: false, daemonAttached: false, dataWired: false, daemonGeneration: 0, remoteLease: Boolean(useRemotePaneLeaseStore.getState().leases[paneId]), visible: false, lastUsedAt: Date.now() }
@@ -649,6 +657,7 @@ class TerminalManagerImpl {
 
     if (entry.opened) this.loadWebglRenderer(entry)
     this.ensurePersistentScrollbar(entry)
+    this.ensureMouseReportingFixes(entry)
 
     if (!entry.dataWired) {
       entry.term.onData((data) => {
@@ -1880,6 +1889,19 @@ class TerminalManagerImpl {
   private ensurePersistentScrollbar(entry: Entry): void {
     if (entry.scrollbarPersistent || !entry.opened) return
     entry.scrollbarPersistent = showPaneScrollbar(entry.term)
+  }
+
+  /** Installed after `term.open()`, never before: `bindMouse` force-fires one
+   *  protocol change during open so a pane restored with mouse tracking already
+   *  set propagates it to the freshly built viewport, and that fire is exactly
+   *  the no-op transition `guardRedundantProtocolChanges` drops. */
+  private ensureMouseReportingFixes(entry: Entry): void {
+    if (entry.mouseReportingFixed || !entry.opened) return
+    // Independent patches: install both, then record whether either applied so a
+    // partial xterm-shape change still installs what it can.
+    const guarded = guardRedundantProtocolChanges(entry.term)
+    const anchored = keepScrollPositionAcrossMouseReports(entry.term)
+    entry.mouseReportingFixed = guarded || anchored
   }
 
   private clearWebglTextureAtlas(entry: Entry): void {
