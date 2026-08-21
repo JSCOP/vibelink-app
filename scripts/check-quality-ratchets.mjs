@@ -97,7 +97,8 @@ const sourceExclusions = [
 const bundleBudgets = [
   ['App', /^App-.*\.js$/, 487_424],
   // 2026-08-20: remote SSH workspaces and terminal-hosted automation runs; measured 618668.
-  ['TerminalManager', /^TerminalManager-.*\.js$/, 619_520],
+  // 2026-08-21: +the mouse-reporting selection and wheel fixes; measured 619,972.
+  ['TerminalManager', /^TerminalManager-.*\.js$/, 620_544],
   // 2026-08-20: same features add ssh target state and account config sync; measured 435580.
   ['store', /^store-.*\.js$/, 436_224],
   ['Monaco', /^monaco-.*\.js$/, 1_285_120],
