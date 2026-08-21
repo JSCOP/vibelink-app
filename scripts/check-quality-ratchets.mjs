@@ -48,7 +48,8 @@ const sourceBudgets = {
   // +19 for the signed-out regression test that pins the removed paywall shut:
   // every previously gated store action must still run with no account.
   'src/state/store.test.ts': 1_446,
-  'src-tauri/src/app/agent_hooks.rs': 2_652,
+  // 2026-08-21: +the non-encoded PowerShell hook launcher and why Defender flagged the old one.
+  'src-tauri/src/app/agent_hooks.rs': 2_680,
   'src-tauri/src/app/android_device_lab.rs': 1_680,
   // 2026-08-20: +cfg(windows) gates so the Linux/macOS compile check stays warning-free.
   'src-tauri/src/app/browser.rs': 1_430,

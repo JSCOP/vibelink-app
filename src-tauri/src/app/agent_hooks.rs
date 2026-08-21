@@ -1058,7 +1058,7 @@ fn managed_command(_spec: &AgentHookSpec, json_spec: JsonHookSpec, script_path: 
 
 fn claude_memory_command(script_path: &Path) -> String {
     if cfg!(windows) {
-        wrap_windows_powershell_hook_command(script_path)
+        wrap_git_bash_powershell_hook_command(script_path)
     } else {
         wrap_posix_hook_command(&script_path.to_string_lossy())
     }
@@ -1695,19 +1695,50 @@ fn wrap_windows_direct_hook_command(path: &Path) -> String {
     }
 }
 
+/// Runs a managed hook script through PowerShell BY PATH.
+///
+/// `-EncodedCommand` is deliberately not used here. Microsoft Defender's machine-learning
+/// heuristics score `powershell -ExecutionPolicy Bypass -EncodedCommand <base64>` as a malware
+/// launcher from the command line alone, and it flagged this hook as `Trojan:Script/Wacatac.B!ml`
+/// on a developer machine the moment Claude Code started a session. The encoded payload was only
+/// ever a `Test-Path` guard around a script that is already on disk, so nothing about it justified
+/// looking like an obfuscated launcher.
+///
+/// `-File` also sidesteps the quoting problem the encoding was working around: a hook command is
+/// handed to whichever shell the agent uses, and `-Command` bodies contain `$LASTEXITCODE`, which
+/// a POSIX shell expands away inside double quotes. A path argument has no `$` in it.
 fn wrap_windows_powershell_hook_command(path: &Path) -> String {
-    let quoted = quote_powershell(&path.to_string_lossy());
-    let command = format!(
-        "if (Test-Path -LiteralPath {quoted} -PathType Leaf) {{ & {quoted}; exit $LASTEXITCODE }}; [Console]::In.ReadToEnd() | Out-Null; exit 0"
-    );
     let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let powershell = format!(
         "{}/System32/WindowsPowerShell/v1.0/powershell.exe",
         system_root.replace('\\', "/")
     );
     format!(
-        "{powershell} -NoProfile -ExecutionPolicy Bypass -EncodedCommand {}",
-        encode_powershell_command(&command)
+        "{powershell} -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+        // Forward slashes are accepted by PowerShell and carry no escape meaning in a POSIX
+        // shell, so one spelling is safe whichever shell the agent hands this to.
+        path.to_string_lossy().replace('\\', "/")
+    )
+}
+
+/// The same launcher, wrapped in the git-bash guard Claude Code's other Windows hooks already use.
+///
+/// This keeps the behaviour the encoded payload provided - a missing script drains stdin and exits
+/// 0 instead of reporting a failed hook - without putting a `$` or a base64 blob on the command
+/// line. Paths git bash cannot quote safely fall back to the bare launcher above.
+fn wrap_git_bash_powershell_hook_command(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if !normalized.chars().all(is_git_bash_safe_char) {
+        return wrap_windows_powershell_hook_command(path);
+    }
+    let quoted = quote_posix(&normalized);
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let powershell = quote_posix(&format!(
+        "{}/System32/WindowsPowerShell/v1.0/powershell.exe",
+        system_root.replace('\\', "/")
+    ));
+    format!(
+        "if [ -f {quoted} ]; then {powershell} -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {quoted}; else cat >/dev/null; fi"
     )
 }
 
