@@ -384,6 +384,9 @@ impl AutomationRunner {
         started_at: u64,
     ) -> RunnerOutcome {
         let executable = command.get_program().to_owned();
+        // The child is spawned here rather than through the registry so stdin can be closed first
+        // (see below), which means the containment the registry relies on has to be requested here.
+        AutomationProcessRegistry::prepare_command(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {

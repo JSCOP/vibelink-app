@@ -116,17 +116,27 @@ impl AutomationProcessRegistry {
     }
 
     pub fn spawn(&self, run_id: &str, command: &mut Command) -> io::Result<RegisteredProcess> {
-        // POSIX has no Job Object. The equivalent containment is a process group the child leads,
-        // which `ProcessControl` can then signal as a unit. This must be requested before the
-        // fork, so `spawn` is the only place that can establish it; a child handed straight to
-        // `register` keeps whatever group it was born into and is signalled individually.
+        Self::prepare_command(command);
+        let child = command.spawn()?;
+        self.register(run_id, child)
+    }
+
+    /// Prepares a command so that whatever it spawns can be contained as a unit.
+    ///
+    /// POSIX has no Job Object; the equivalent is a process group the child leads, and that has to
+    /// be requested BEFORE the fork. `AutomationRunner` spawns its own child so it can write and
+    /// close stdin before handing it over, so it cannot go through `spawn` and must call this
+    /// itself - otherwise the child keeps whatever group it was born into, `ProcessControl::assign`
+    /// refuses to record a group it does not lead, and cancelling the run reaches only the direct
+    /// child while the agent's own descendants survive.
+    pub fn prepare_command(command: &mut Command) {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
             command.process_group(0);
         }
-        let child = command.spawn()?;
-        self.register(run_id, child)
+        #[cfg(not(unix))]
+        let _ = command;
     }
 
     pub fn register(&self, run_id: &str, mut child: Child) -> io::Result<RegisteredProcess> {
@@ -583,33 +593,28 @@ fn process_start_time(pid: u32) -> io::Result<u64> {
         })
 }
 
+/// Refuses to signal a process recorded by an earlier daemon run.
+///
+/// This deliberately does not kill anything. A persisted process is not a child of this daemon, so
+/// the only evidence of its identity is a numeric PID plus the recorded start time - and on POSIX
+/// that start time has one-second resolution, which a recycled PID can match. Even a finer clock
+/// would not be enough: the check and the signal are separate syscalls, so the PID can be reused
+/// between them. Killing an unrelated process is a worse outcome than leaving one stale agent
+/// running, so this fails closed and `AutomationService` logs the refusal and leaves the run for
+/// the user to rerun.
+///
+/// Closing it properly needs a handle that pins the process the way the Windows one does -
+/// `pidfd_open` on Linux, `proc_pidinfo` identity on macOS - and that belongs with the POSIX host,
+/// which is the first build where this path can run at all.
 #[cfg(unix)]
 pub fn terminate_persisted_process(identity: &AutomationRuntimeIdentity) -> io::Result<bool> {
-    // A process recorded by an earlier daemon run is not a child of this one, so there is nothing
-    // to reap and the PID must be re-identified before it is signalled.
-    match process_start_time(identity.pid) {
-        Ok(start_time) if start_time == identity.process_start_time => {}
-        Ok(_) => return Ok(false),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    }
-    // SAFETY: `getpgid` reads scheduler metadata for `pid` and mutates nothing.
-    let group = unsafe { libc::getpgid(identity.pid as libc::pid_t) };
-    let signalled = if group > 0 && group == identity.pid as libc::pid_t {
-        // SAFETY: the recorded process leads this group, so the signal cannot reach the daemon.
-        unsafe { libc::killpg(group, libc::SIGKILL) }
-    } else {
-        // SAFETY: delivers a signal to the exact PID whose start time was just verified.
-        unsafe { libc::kill(identity.pid as libc::pid_t, libc::SIGKILL) }
-    };
-    if signalled == 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        return Ok(false);
-    }
-    Err(error)
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "automation process {} cannot be re-identified safely on this platform; refusing to signal it",
+            identity.pid
+        ),
+    ))
 }
 
 fn spawn_waiter(mut child: Child, completion: Arc<Completion>) -> io::Result<()> {

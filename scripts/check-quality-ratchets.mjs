@@ -16,7 +16,8 @@ const sourceBudgets = {
   // byte budget, with a bounded hold for a frame whose end has not arrived.
   // 2026-08-20: +16 lines for coalesced input-batch flush (one write_pane per queued burst).
   // 2026-08-20: +screen-state detection scheduling hooks.
-  'src/terminal/TerminalManager.ts': 2_472,
+  // 2026-08-21: +22 for wheel routing and the mouse-reporting fix-up install; the policy itself lives in mouseReporting.ts.
+  'src/terminal/TerminalManager.ts': 2_494,
   'src/state/store.ts': 2_210,
   'src/components/git/GitWorkspaceProvider.tsx': 1_516,
   'src-tauri/src/remote/bridge.rs': 5_608,
@@ -63,7 +64,8 @@ const sourceBudgets = {
   'src-tauri/src/app/git/worktree_lifecycle.rs': 2_396,
   'src-tauri/src/app/provider_integrations.rs': 2_056,
   'src-tauri/src/app/spawn_daemon.rs': 1_982,
-  'src-tauri/src/daemon/automation/runner.rs': 1_390,
+  // 2026-08-21: +the pre-fork process-group setup the registry can no longer do for it.
+  'src-tauri/src/daemon/automation/runner.rs': 1_393,
   // Grew once to carry both browser backends after browser_page/browser_extension/chrome_profile were split out,
   // then again for the extension diagnostics — unloaded vs. refused-by-id — that keep agents out of a guessing loop.
   'src-tauri/src/dedicated_cli/browser_cdp.rs': 1_973,
