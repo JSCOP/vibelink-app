@@ -74,6 +74,32 @@ fn platform_browser_provider(
     Arc::new(crate::browser::UnsupportedBrowserProvider)
 }
 
+/// Deletes the copies the installer renames aside when it cannot overwrite a running binary.
+///
+/// `vibelink.exe mcp serve` outlives an update because it belongs to whichever agent CLI
+/// started it, so the NSIS pre-install hook moves the locked image to `<name>.old` instead of
+/// failing the install. Nothing is running from those by the time the app next starts, and a
+/// failure here is not worth reporting: the next install and the next launch both retry.
+#[cfg(windows)]
+fn remove_superseded_binaries() {
+    let Ok(executable) = std::env::current_exe() else {
+        return;
+    };
+    let Some(directory) = executable.parent() else {
+        return;
+    };
+    for name in [
+        "vibelink.exe.old",
+        "vibelink-computer-host.exe.old",
+        "app.exe.old",
+    ] {
+        let _ = std::fs::remove_file(directory.join(name));
+    }
+}
+
+#[cfg(not(windows))]
+fn remove_superseded_binaries() {}
+
 /// Exit policy shared with the frontend `settings.sessionRestore`.
 ///
 /// Orca parity: quitting is a real quit. `Resume` keeps the detached daemon
@@ -209,6 +235,7 @@ pub fn run() {
                 browser_root.join("profiles"),
             )));
 
+            remove_superseded_binaries();
             app.manage(capture::CaptureState::default());
             app.manage(ExitPrefs::default());
             if let Err(error) = tray::build(app.handle()) {
